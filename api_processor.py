@@ -14,8 +14,9 @@ from tqdm import tqdm
 from datetime import datetime
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from pymongo.errors import PyMongoError, DuplicateKeyError
-from typing import Dict, List, Any, Optional, Union
+from pymongo.errors import PyMongoError
+from typing import Dict, List, Any, Optional
+from query_processor import query_pinecone_and_summarize
 
 # Cargar variables de entorno
 load_dotenv()
@@ -119,19 +120,19 @@ class APIProcessor:
     
     def _normalize_company_number(self, company_number: str) -> str:
         """
-        Normaliza el número de compañía eliminando ceros a la izquierda
+        Mantiene el formato original del número de compañía
         
         Args:
-            company_number (str): Número de compañía a normalizar
+            company_number (str): Número de compañía a procesar
             
         Returns:
-            str: Número de compañía normalizado
+            str: Número de compañía en su formato original
         """
         if not company_number:
             return company_number
-            
-        # Eliminar ceros a la izquierda
-        return company_number.lstrip("0")
+        
+        # Mantener el formato original, incluyendo ceros a la izquierda
+        return company_number.strip()
     
     def get_processed_files(self, limit: int = None) -> List[Dict[str, Any]]:
         """
@@ -170,38 +171,20 @@ class APIProcessor:
     
     def fetch_company_info(self, company_number: str, account_date: str) -> Optional[Dict[str, Any]]:
         """
-        Fetch company information from API
-        
-        Args:
-            company_number (str): Company registration number
-            account_date (str): Account date (YYYY-MM-DD format)
-            
-        Returns:
-            dict|None: Company information or None if request failed
+        Obtiene información de la compañía desde la API externa.
         """
         try:
-            # Normalizar el company_number antes de enviarlo a la API
-            normalized_company_number = self._normalize_company_number(company_number)
+            # Mantener el company_number en su formato original
+            company_number = company_number.strip()
             
-            # Construir URL de la API
-            url = f"{self.api_base_url}/company/extract"
+            # Construir la URL de la API
+            url = f"{self.api_base_url}/company/{company_number}"
             
-            # Preparar parámetros de la solicitud
-            params = {
-                "companyNumber": normalized_company_number,
-                "accountDate": account_date
-            }
-            
-            logger.info(f"Sending request to API for company {normalized_company_number} with date {account_date}")
-            
-            # Realizar solicitud GET con timeouts adecuados
-            # - connect_timeout: tiempo máximo para establecer conexión
-            # - read_timeout: tiempo máximo para recibir la respuesta completa
+            # Hacer la petición a la API
             response = requests.get(
-                url, 
-                params=params, 
-                timeout=(10, 60),  # (connect_timeout, read_timeout) en segundos
-                stream=False  # Asegura que la respuesta se descarga completamente antes de continuar
+                url,
+                params={"account_date": account_date},
+                timeout=30
             )
             
             # Esperar explícitamente a que se descargue todo el contenido
@@ -213,7 +196,7 @@ class APIProcessor:
                 try:
                     data = response.json()
                 except ValueError as e:
-                    logger.error(f"Invalid JSON response from API for company {normalized_company_number}: {e}")
+                    logger.error(f"Invalid JSON response from API for company {company_number}: {e}")
                     logger.debug(f"Response content: {content[:500]}...")  # Log primeros 500 caracteres
                     return None
                 
@@ -225,10 +208,10 @@ class APIProcessor:
                     if "company_number" in company_info:
                         company_info["company_number"] = self._normalize_company_number(company_info["company_number"])
                     
-                    logger.info(f"Successfully fetched info for company {normalized_company_number}")
+                    logger.info(f"Successfully fetched info for company {company_number}")
                     return company_info
                 else:
-                    logger.warning(f"API response for company {normalized_company_number} does not contain company_info")
+                    logger.warning(f"API response for company {company_number} does not contain company_info")
                     if "meta" in data:
                         logger.info(f"API response metadata: {data['meta']}")
                     logger.debug(f"Full API response: {data}")
@@ -270,11 +253,9 @@ class APIProcessor:
                 logger.error("Cannot store company info without company_number")
                 return False
             
-            # Normalizar el número de compañía
-            normalized_company_number = self._normalize_company_number(company_number)
-            
-            # Actualizar el número de compañía normalizado en el documento
-            company_info["company_number"] = normalized_company_number
+            # Mantener el formato original del company_number
+            company_number = company_number.strip()
+            company_info["company_number"] = company_number
             
             # Añadir timestamps
             document = {
@@ -283,7 +264,7 @@ class APIProcessor:
             }
             
             # Verificar si ya existe un documento con este company_number normalizado
-            existing = self.results_collection.find_one({"company_number": normalized_company_number})
+            existing = self.results_collection.find_one({"company_number": company_number})
             
             # Si es un nuevo documento, añadir inserted_at
             if not existing:
@@ -291,15 +272,15 @@ class APIProcessor:
             
             # Upsert para actualizar si existe, insertar si no
             result = self.results_collection.update_one(
-                {"company_number": normalized_company_number},
+                {"company_number": company_number},
                 {"$set": document},
                 upsert=True
             )
             
             if result.upserted_id:
-                logger.info(f"Inserted new company data: {normalized_company_number}")
+                logger.info(f"Inserted new company data: {company_number}")
             else:
-                logger.info(f"Updated existing company data: {normalized_company_number}")
+                logger.info(f"Updated existing company data: {company_number}")
             
             return True
             
@@ -422,12 +403,16 @@ class APIProcessor:
             # Intentar obtener información de la compañía con reintentos
             company_info = None
             for attempt in range(max_retries):
-                company_info = self.fetch_company_info(company_number, account_date)
+                # Reemplazar fetch_company_info por query_pinecone_and_summarize
+                # Crear query con company_number y account_date
+                query = f"company number {company_number} account date {account_date}"
+                company_info = query_pinecone_and_summarize(query)
+                
                 if company_info:
                     break
                 
                 if attempt < max_retries - 1:
-                    logger.info(f"Retrying API request for {company_number} (attempt {attempt+1}/{max_retries})")
+                    logger.info(f"Retrying Pinecone query for {company_number} (attempt {attempt+1}/{max_retries})")
                     time.sleep(self.delay_seconds * (attempt + 1))  # Espera incremental
             
             # Si tenemos información, guardarla en MongoDB

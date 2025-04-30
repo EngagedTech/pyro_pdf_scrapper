@@ -153,7 +153,7 @@ class XBRLParser:
 
     def _extract_data_from_filename(self, filename):
         """
-        Extrae datos del nombre del archivo usando el patrón Prod224_2476_00002687_20240405.html
+        Extrae información del nombre del archivo usando el patrón Prod224_2476_00002687_20240405.html
         
         Args:
             filename (str): Nombre del archivo
@@ -161,40 +161,39 @@ class XBRLParser:
         Returns:
             dict: Datos extraídos del nombre del archivo
         """
-        data = {
-            'company_number': '',
-            'account_date': '',
-            'year': None,
-            'month': None,
-            'day': None
-        }
-        
-        # Eliminar extensión y dividir por guiones bajos
-        base_name = os.path.splitext(filename)[0]
-        parts = base_name.split('_')
-        
-        # Verificar si tiene el formato esperado (al menos 4 partes)
-        if len(parts) >= 4:
-            # Company number está en la tercera posición [2]
-            data['company_number'] = parts[2].lstrip('0')  # Eliminar ceros a la izquierda
+        try:
+            # Eliminar extensión y dividir por guiones bajos
+            base_name = os.path.splitext(filename)[0]
+            parts = base_name.split('_')
             
-            # Fecha en la cuarta posición [3]
-            date_str = parts[3]
-            if len(date_str) == 8 and date_str.isdigit():
-                # Formato YYYYMMDD
-                year = date_str[0:4]
-                month = date_str[4:6]
-                day = date_str[6:8]
+            # Verificar si tiene el formato esperado (al menos 4 partes)
+            if len(parts) >= 4:
+                # Company number está en la penúltima posición
+                company_number = parts[-2]  # Penúltima posición
                 
-                data['account_date'] = f"{year}-{month}-{day}"
-                try:
-                    data['year'] = int(year)
-                    data['month'] = int(month)
-                    data['day'] = int(day)
-                except ValueError:
-                    pass
-        
-        return data
+                # Fecha en la última posición
+                date_str = parts[-1]  # Última posición
+                if len(date_str) == 8 and date_str.isdigit():
+                    # Formato YYYYMMDD
+                    year = date_str[0:4]
+                    month = date_str[4:6]
+                    day = date_str[6:8]
+                    
+                    account_date = f"{year}-{month}-{day}"
+                else:
+                    account_date = date_str
+                    
+                return {
+                    'company_number': company_number,
+                    'account_date': account_date
+                }
+            else:
+                logger.warning(f"Formato de nombre de archivo inesperado: {filename}")
+                return {}
+            
+        except Exception as e:
+            logger.error(f"Error al extraer datos del nombre del archivo {filename}: {e}")
+            return {}
 
     def _flatten_metadata(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """

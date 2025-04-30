@@ -21,3 +21,9 @@ pymongo
 tqdm
 
 # Nota: zipfile36 fue reemplazado por zipfile en la biblioteca estándar de Python
+
+# New dependencies
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+tiktoken>=0.3.0
+openai>=1.0.0

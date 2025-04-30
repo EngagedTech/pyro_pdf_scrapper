@@ -60,6 +60,12 @@ PARQUET_DIR=parquet_files
 
 # Vector dimensions
 VECTOR_DIMENSIONS=1536  # Dimensión para OpenAI embeddings
+
+# Variables para query_processor.py
+PINECONE_FIELDS=company_number,company_name,company_legal_type,accounts_date,highest_paid_director.name,highest_paid_director.remuneration,total_director_remuneration,currency
+BATCH_SIZE=50
+OPENAI_MAX_TOKENS_PER_BATCH=4000
+OPENAI_REQUEST_TIMEOUT=60
 ```
 
 ## Uso
@@ -113,3 +119,28 @@ python main.py --no-limit
 4. Convierte archivos XBRL a formato Parquet
 5. (Opcional) Sube archivos Parquet a S3
 6. Importa datos a Pinecone usando la API de importación masiva
+
+## Nuevo flujo con Pinecone y OpenAI
+
+El proyecto ahora incluye un nuevo módulo `query_processor.py` que permite consultar documentos en Pinecone y extraer información estructurada mediante OpenAI.
+
+### Cómo utilizar el nuevo flujo
+
+El procesador API (`api_processor.py`) ahora utiliza internamente esta funcionalidad para consultar información de empresas, reemplazando las consultas a APIs externas:
+
+```python
+from query_processor import query_pinecone_and_summarize
+
+# Generar una consulta
+query = f"company number {company_number} account date {account_date}"
+
+# Ejecutar la consulta y obtener la información estructurada
+company_info = query_pinecone_and_summarize(query)
+```
+
+Este flujo optimizado para producción incluye:
+- Reintento automático con backoff exponencial
+- Control preciso de tokens con tiktoken
+- Procesamiento por lotes
+- Validación de configuración con Pydantic
+- Registro detallado de errores y eventos
