@@ -17,8 +17,11 @@ pinecone>=6.0.0
 # Otras dependencias
 python-xbrl
 psutil
-pymongo
 tqdm
+
+# MongoDB y Motor
+pymongo==4.3.3
+motor==3.1.1
 
 # Nota: zipfile36 fue reemplazado por zipfile en la biblioteca estándar de Python
 
@@ -27,3 +30,16 @@ pydantic>=2.0.0
 pydantic-settings>=2.0.0
 tiktoken>=0.3.0
 openai>=1.0.0
+
+# Stack Async
+fastapi==0.109.2
+celery==5.3.6
+redis==5.0.1
+aiohttp==3.9.3
+dask==2024.1.1
+pinecone-client==3.0.2
+prometheus-client==0.19.0
+uvicorn==0.27.1
+python-multipart==0.0.9
+aiofiles==23.2.1
+httpx==0.26.0
