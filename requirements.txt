@@ -19,9 +19,9 @@ python-xbrl
 psutil
 tqdm
 
-# MongoDB y Motor
-pymongo==4.3.3
-motor==3.1.1
+# MongoDB y Motor - Versiones compatibles
+pymongo==4.5.0
+motor==3.3.1
 
 # Nota: zipfile36 fue reemplazado por zipfile en la biblioteca estándar de Python
 

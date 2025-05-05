@@ -59,7 +59,7 @@ class EnvConfig(BaseSettings):
     # OpenAI settings
     openai_api_key: str = Field(..., env='OPENAI_API_KEY')
     openai_model: str = Field(..., env='OPENAI_MODEL')
-    openai_max_tokens_per_batch: int = Field(4000, env='OPENAI_MAX_TOKENS_PER_BATCH')
+    openai_max_tokens_per_batch: int = Field(2048, env='OPENAI_MAX_TOKENS_PER_BATCH')
     openai_request_timeout: int = Field(60, env='OPENAI_REQUEST_TIMEOUT')
     openai_extra_headers: Optional[Dict[str, str]] = None
     
@@ -85,11 +85,43 @@ class EnvConfig(BaseSettings):
                 raise ValueError("OPENAI_EXTRA_HEADERS must be a valid JSON string")
         return v
     
+    @validator('openai_max_tokens_per_batch')
+    def validate_max_tokens(cls, v, values):
+        """Ensure max_tokens is within model limits."""
+        model = values.get('openai_model', 'gpt-3.5-turbo-0125')
+        
+        # Define max completion token limits for different models
+        model_limits = {
+            'gpt-3.5-turbo': 4096,
+            'gpt-3.5-turbo-0125': 4096,
+            'gpt-4': 8192,
+            'gpt-4-turbo': 4096,
+            'gpt-4o': 4096
+        }
+        
+        # Get model base name (without version)
+        model_base = '-'.join(model.split('-')[:2])
+        if model in model_limits:
+            max_allowed = model_limits[model]
+        elif model_base in model_limits:
+            max_allowed = model_limits[model_base]
+        else:
+            # Default conservative limit
+            max_allowed = 2048
+            logger.warning(f"Unknown model: {model}. Using conservative max_tokens limit of {max_allowed}")
+        
+        # Cap max_tokens to model limit
+        if v > max_allowed:
+            logger.warning(f"Reducing openai_max_tokens_per_batch from {v} to {max_allowed} to fit model limits")
+            return max_allowed
+        
+        return v
+    
     @root_validator(skip_on_failure=True)
     def check_token_limits(cls, values):
         """Ensure batch_size and token limits are compatible."""
         batch_size = values.get('batch_size', 100)
-        max_tokens = values.get('openai_max_tokens_per_batch', 4000)
+        max_tokens = values.get('openai_max_tokens_per_batch', 2048)
         
         # Each record might take ~200 tokens on average (very rough estimate)
         # This ensures we don't exceed token limits by default
@@ -227,7 +259,7 @@ def prepare_batches(
     Args:
         matches: List of Pinecone match results
         batch_size: Maximum number of records per batch
-        max_tokens: Maximum tokens allowed per batch
+        max_tokens: Maximum tokens allowed for completion 
         model: OpenAI model identifier
         
     Returns:
@@ -237,20 +269,99 @@ def prepare_batches(
     current_batch = []
     current_token_count = 0
     
+    # Define model context limits for common models
+    model_context_limits = {
+        'gpt-3.5-turbo': 16385,
+        'gpt-3.5-turbo-0125': 16385,
+        'gpt-4': 8192,
+        'gpt-4-turbo': 128000,
+        'gpt-4o': 128000
+    }
+    
     # Token count for the prompt template (estimated)
     prompt_template = """
-    Extract as JSON the following fields from these records:
-    - company_number
-    - company_name
-    - company_legal_type
-    - accounts_date (dd/mm/yyyy)
-    - highest_paid_director.name
-    - highest_paid_director.remuneration
-    - total_director_remuneration
-    - currency
-    Records: []
+    Carefully analyze the following company information and extract the requested data in JSON format.
+    These are search results from a database containing company financial data.
+    If any value is not explicitly reported in the records, you must use exactly "N/R".
+    
+    Records to analyze:
+    [RECORDS_PLACEHOLDER]
+    
+    Please return the data in the specified JSON format. If any value is not explicitly reported, return "N/R".
+    
+    1. Company Number (Core Ref)
+    2. Company Name
+    3. Company Legal Type
+    4. Accounts Date (dd/mm/yyyy)
+    5. Highest Paid Director (name and remuneration)
+    6. Total Director Remuneration
+    7. Currency (ISO code e.g. GBP, EUR, USD)
+    
+    Instructions:
+    - If the records contain values in a column format by year, use the most recent year available.
+    - For "Total Director Remuneration":
+      - Look for values near or below labels like "Remuneration paid to directors"
+      - If more than one year is shown, use the most recent year's figure
+    - For "Highest Paid Director":
+      - VERY IMPORTANT: Search for any text containing "Remuneration" related to the highest paid director
+      - Use values under sections such as "Remuneration disclosed above include the following amounts paid to the highest paid director"
+      - If there is a line like "Remuneration for qualifying services" within a section mentioning the highest paid director, use that number
+      - If no name is mentioned, return "N/R" for name
+      - Make sure to thoroughly scan all records for any mention of highest paid director remuneration
+    - For "Currency":
+      - Look for currency symbols (£, €, $, etc.) or explicit currency mentions and return the corresponding ISO code:
+        * £ -> "GBP"
+        * € -> "EUR" 
+        * $ -> "USD"
+      - If no explicit symbol is found but amounts are shown with decimals (e.g. 1,234.56), infer "GBP" for UK companies
+      - If still unclear, return "N/R"
+    
+    Expected format:
+    {
+      "company_number": "...",
+      "company_name": "...",
+      "company_legal_type": "...",
+      "accounts_date": "dd/mm/yyyy",
+      "highest_paid_director": {
+        "name": "...",
+        "remuneration": "..."
+      },
+      "total_director_remuneration": "...",
+      "currency": "..."
+    }
+    
+    Respond ONLY with the JSON object, no explanation.
     """
     base_token_count = get_token_count(prompt_template, model)
+    logger.info(f"Base prompt uses {base_token_count} tokens")
+    
+    # Get model base name (without version)
+    model_base = '-'.join(model.split('-')[:2])
+    
+    # Determine context window size
+    if model in model_context_limits:
+        context_window = model_context_limits[model]
+    elif model_base in model_context_limits:
+        context_window = model_context_limits[model_base]
+    else:
+        # Default conservative limit
+        context_window = 4096
+        logger.warning(f"Unknown model: {model}. Using conservative context window of {context_window}")
+    
+    # El límite máximo real para mensajes de entrada es el contexto total menos los tokens reservados para la respuesta
+    # max_tokens es el espacio reservado para la respuesta/completion
+    max_input_tokens = context_window - max_tokens - 50  # 50 tokens de margen de seguridad
+    
+    # Tokens disponibles para records después de contar el prompt base
+    available_record_tokens = max_input_tokens - base_token_count
+    
+    logger.info(f"Model: {model}, Context window: {context_window}, Max output tokens: {max_tokens}")
+    logger.info(f"Available tokens for records: {available_record_tokens} tokens")
+    
+    # Estimar tamaño de batch óptimo
+    avg_token_per_record = 200  # estimación aproximada
+    optimal_batch_size = min(batch_size, available_record_tokens // avg_token_per_record)
+    logger.info(f"Optimal batch size estimate: {optimal_batch_size} records")
     
     for match in matches:
         # Get metadata from match
@@ -260,11 +371,13 @@ def prepare_batches(
         record_text = json.dumps(metadata)
         record_token_count = get_token_count(record_text, model)
         
-        # Check if adding this record would exceed token limit
-        if (current_token_count + record_token_count + base_token_count > max_tokens or 
-            len(current_batch) >= batch_size) and current_batch:
+        # Check if adding this record would exceed token limit or if batch is already at optimal size
+        if (current_token_count + record_token_count > available_record_tokens or 
+            len(current_batch) >= optimal_batch_size) and current_batch:
             # Current batch is full, start a new one
             batches.append(current_batch)
+            logger.info(f"Created batch with {len(current_batch)} records, {current_token_count} record tokens "
+                       f"(total with prompt: {current_token_count + base_token_count})")
             current_batch = [metadata]
             current_token_count = record_token_count
         else:
@@ -275,8 +388,25 @@ def prepare_batches(
     # Add the last batch if it's not empty
     if current_batch:
         batches.append(current_batch)
+        logger.info(f"Final batch: {len(current_batch)} records, {current_token_count} record tokens "
+                   f"(total with prompt: {current_token_count + base_token_count})")
     
     logger.info(f"Split {len(matches)} records into {len(batches)} batches")
+    
+    # Logging batch statistics
+    if batches:
+        total_records = sum(len(batch) for batch in batches)
+        avg_batch_size = total_records / len(batches)
+        logger.info(f"Average batch size: {avg_batch_size:.2f} records")
+        
+        # Verificar que ningún batch exceda el límite de tokens
+        for i, batch in enumerate(batches):
+            batch_text = json.dumps(batch)
+            batch_tokens = get_token_count(batch_text, model) + base_token_count
+            logger.info(f"Batch {i+1} total tokens (with prompt): {batch_tokens}/{max_input_tokens}")
+            if batch_tokens > max_input_tokens:
+                logger.warning(f"⚠️ Batch {i+1} exceeds input token limit: {batch_tokens}/{max_input_tokens}")
+    
     return batches
 
 
@@ -346,6 +476,10 @@ def query_openai(
     Respond ONLY with the JSON object, no explanation.
     """
     
+    # Log token count for diagnostics
+    input_token_count = get_token_count(prompt, model)
+    logger.info(f"Input message token count: {input_token_count}")
+    
     # Prepare common request arguments
     common_args = {
         "model": model,
@@ -414,11 +548,25 @@ def process_batches(batches: List[List[Dict]], config: EnvConfig) -> Dict:
     Returns:
         Dict: Aggregated results from all batches
     """
-    results = {}
+    # Inicializar diccionario de resultados con valores predeterminados "N/R"
+    results = {
+        "company_number": "N/R",
+        "company_name": "N/R",
+        "company_legal_type": "N/R",
+        "accounts_date": "N/R",
+        "highest_paid_director": {
+            "name": "N/R",
+            "remuneration": "N/R"
+        },
+        "total_director_remuneration": "N/R",
+        "currency": "N/R"
+    }
+    
+    batch_results_list = []  # Recopilar resultados de todos los batches
     
     for i, batch in enumerate(batches):
         logger.info(f"Processing batch {i+1}/{len(batches)} with {len(batch)} records")
-        
+        start_time = time.time()
         try:
             batch_results = query_openai(
                 batch=batch,
@@ -428,20 +576,124 @@ def process_batches(batches: List[List[Dict]], config: EnvConfig) -> Dict:
                 extra_headers=config.openai_extra_headers
             )
             
-            # Merge batch results into final results
-            for key, value in batch_results.items():
-                if key == "highest_paid_director" and isinstance(value, dict):
-                    # Handle nested dictionary for director
-                    results.setdefault(key, {}).update(value)
-                else:
-                    # For simple fields, use the latest value
-                    results[key] = value
+            elapsed = time.time() - start_time
+            logger.info(f"Batch {i+1}/{len(batches)} processed in {elapsed:.2f} seconds")
+            
+            # Validar y sanitizar resultados del batch
+            sanitized_results = sanitize_batch_results(batch_results)
+            batch_results_list.append(sanitized_results)
+            
+            # Log para verificar resultados
+            logger.info(f"Batch {i+1} results: {json.dumps(sanitized_results)[:200]}...")
             
         except Exception as e:
             logger.error(f"Error processing batch {i+1}: {str(e)}")
-            # Continue with next batch
+            # Continuar con el siguiente batch
     
-    return results
+    # Si no hay resultados válidos, devolver el diccionario con valores "N/R"
+    if not batch_results_list:
+        logger.warning("No valid results from any batch")
+        return results
+    
+    # Combinar resultados de todos los batches, priorizando valores no vacíos y no "N/R"
+    return merge_batch_results(batch_results_list, results)
+
+
+def sanitize_batch_results(batch_results: Dict) -> Dict:
+    """
+    Sanitiza y valida los resultados de un batch.
+    Reemplaza cadenas vacías con "N/R" y asegura que la estructura sea correcta.
+    """
+    # Estructura esperada
+    expected_structure = {
+        "company_number": "N/R",
+        "company_name": "N/R",
+        "company_legal_type": "N/R",
+        "accounts_date": "N/R",
+        "highest_paid_director": {
+            "name": "N/R",
+            "remuneration": "N/R"
+        },
+        "total_director_remuneration": "N/R",
+        "currency": "N/R"
+    }
+    
+    # Si batch_results no es un diccionario, devolver la estructura esperada
+    if not isinstance(batch_results, dict):
+        logger.error(f"Batch results is not a dictionary: {type(batch_results)}")
+        return expected_structure
+    
+    # Copia sanitizada para devolver
+    sanitized = {}
+    
+    # Procesar campos principales
+    for key in ["company_number", "company_name", "company_legal_type", "accounts_date", 
+                "total_director_remuneration", "currency"]:
+        if key in batch_results:
+            value = batch_results[key]
+            # Sanitizar valor
+            if value is None or value == "":
+                sanitized[key] = "N/R"
+            else:
+                sanitized[key] = value
+        else:
+            sanitized[key] = "N/R"
+    
+    # Procesar highest_paid_director específicamente
+    if "highest_paid_director" in batch_results and isinstance(batch_results["highest_paid_director"], dict):
+        hpd = batch_results["highest_paid_director"]
+        sanitized["highest_paid_director"] = {
+            "name": hpd.get("name", "N/R") if hpd.get("name") not in [None, ""] else "N/R",
+            "remuneration": hpd.get("remuneration", "N/R") if hpd.get("remuneration") not in [None, ""] else "N/R"
+        }
+    else:
+        sanitized["highest_paid_director"] = {
+            "name": "N/R",
+            "remuneration": "N/R"
+        }
+    
+    # Corrección específica para account_date vs accounts_date
+    # Si existe account_date pero no accounts_date, usar account_date
+    if "account_date" in batch_results and batch_results["account_date"] and not sanitized.get("accounts_date", "N/R") == "N/R":
+        sanitized["accounts_date"] = batch_results["account_date"]
+    
+    return sanitized
+
+
+def merge_batch_results(batch_results_list: List[Dict], default_results: Dict) -> Dict:
+    """
+    Combina los resultados de múltiples batches, priorizando valores significativos.
+    """
+    # Comenzar con los valores predeterminados
+    merged = default_results.copy()
+    
+    # Función para determinar si un valor es significativo (no vacío, no "N/R")
+    def is_significant(value):
+        if isinstance(value, str):
+            return value and value != "N/R"
+        return value is not None
+    
+    # Para cada batch de resultados
+    for batch_result in batch_results_list:
+        # Para cada campo principal
+        for key in ["company_number", "company_name", "company_legal_type", "accounts_date", 
+                  "total_director_remuneration", "currency"]:
+            if key in batch_result and is_significant(batch_result[key]):
+                merged[key] = batch_result[key]
+        
+        # Para highest_paid_director
+        if "highest_paid_director" in batch_result and isinstance(batch_result["highest_paid_director"], dict):
+            hpd = batch_result["highest_paid_director"]
+            
+            # Combinar el nombre si es significativo
+            if "name" in hpd and is_significant(hpd["name"]):
+                merged["highest_paid_director"]["name"] = hpd["name"]
+            
+            # Combinar la remuneración si es significativa
+            if "remuneration" in hpd and is_significant(hpd["remuneration"]):
+                merged["highest_paid_director"]["remuneration"] = hpd["remuneration"]
+    
+    return merged
 
 
 def embed_text(query: str) -> List[float]:
@@ -509,12 +761,23 @@ def query_pinecone_and_summarize(query: str) -> Dict:
         
         # Query Pinecone
         results = query_pinecone(query_vector, config)
-        logger.info(f"Pinecone query results: {results}")
+        # logger.info(f"Pinecone query results: {results}")
         matches = results.get("matches", [])
         
         if not matches:
             logger.warning("No matches found in Pinecone")
-            return {}
+            return {
+                "company_number": "N/R",
+                "company_name": "N/R",
+                "company_legal_type": "N/R",
+                "accounts_date": "N/R",
+                "highest_paid_director": {
+                    "name": "N/R",
+                    "remuneration": "N/R"
+                },
+                "total_director_remuneration": "N/R",
+                "currency": "N/R"
+            }
         
         # Prepare batches within token limits
         batches = prepare_batches(
@@ -527,23 +790,20 @@ def query_pinecone_and_summarize(query: str) -> Dict:
         # Process batches and aggregate results
         final_results = process_batches(batches, config)
         
-        # Ensure the output has the expected structure
-        expected_keys = [
-            "company_number", "company_name", "company_legal_type", 
-            "accounts_date", "highest_paid_director", 
-            "total_director_remuneration", "currency"
-        ]
-        
-        for key in expected_keys:
-            if key not in final_results:
-                if key == "highest_paid_director":
-                    final_results[key] = {"name": "", "remuneration": ""}
-                else:
-                    final_results[key] = ""
-        
         return final_results
         
     except Exception as e:
         logger.error(f"Error in query_pinecone_and_summarize: {str(e)}")
-        # Return empty dict on failure
-        return {} 
+        # Return dictionary with N/R values on failure
+        return {
+            "company_number": "N/R",
+            "company_name": "N/R",
+            "company_legal_type": "N/R",
+            "accounts_date": "N/R",
+            "highest_paid_director": {
+                "name": "N/R",
+                "remuneration": "N/R"
+            },
+            "total_director_remuneration": "N/R",
+            "currency": "N/R"
+        } 
