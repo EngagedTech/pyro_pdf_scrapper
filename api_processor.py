@@ -71,7 +71,7 @@ class APIProcessor:
         self._connect_mongodb()
         
         logger.info(f"APIProcessor initialized with API URL: {self.api_base_url}")
-    
+
     def _connect_mongodb(self):
         """Conectar a MongoDB y obtener colecciones"""
         try:
@@ -111,7 +111,7 @@ class APIProcessor:
         except PyMongoError as e:
             logger.error(f"Failed to connect to MongoDB: {e}")
             raise
-    
+
     def close(self):
         """Cerrar conexión a MongoDB"""
         if self.client:
@@ -133,7 +133,7 @@ class APIProcessor:
         
         # Mantener el formato original, incluyendo ceros a la izquierda
         return company_number.strip()
-    
+
     def get_processed_files(self, limit: int = None) -> List[Dict[str, Any]]:
         """
         Obtener lista de archivos procesados de MongoDB
@@ -168,7 +168,7 @@ class APIProcessor:
         except PyMongoError as e:
             logger.error(f"Error retrieving processed files: {e}")
             return []
-    
+
     def fetch_company_info(self, company_number: str, account_date: str) -> Optional[Dict[str, Any]]:
         """
         Obtiene información de la compañía desde la API externa.
@@ -178,12 +178,12 @@ class APIProcessor:
             company_number = company_number.strip()
             
             # Construir la URL de la API
-            url = f"{self.api_base_url}/company/{company_number}"
+            url = f"{self.api_base_url}/company/extract/"
             
             # Hacer la petición a la API
             response = requests.get(
                 url,
-                params={"account_date": account_date},
+                params={"company_number": company_number, "account_date": account_date},
                 timeout=30
             )
             
@@ -235,7 +235,7 @@ class APIProcessor:
         except Exception as e:
             logger.error(f"Unexpected error during API request for company {company_number}: {e}", exc_info=True)
             return None
-    
+
     def store_company_info(self, company_info: Dict[str, Any]) -> bool:
         """
         Store company information in MongoDB results collection
@@ -353,13 +353,14 @@ class APIProcessor:
             logger.error(f"Error during deduplication: {e}")
             return stats
     
-    def process_files(self, limit: int = None, max_retries: int = 3) -> Dict[str, int]:
+    def process_files(self, limit: int = None, max_retries: int = 3, source: str = "pinecone") -> Dict[str, int]:
         """
         Process files and update MongoDB
         
         Args:
             limit (int, optional): Maximum number of files to process
             max_retries (int): Maximum number of retries for API requests
+            source (str): Source of data: "pinecone" or "api"
             
         Returns:
             dict: Statistics about processing
@@ -403,17 +404,17 @@ class APIProcessor:
             # Intentar obtener información de la compañía con reintentos
             company_info = None
             for attempt in range(max_retries):
-                # Reemplazar fetch_company_info por query_pinecone_and_summarize
-                # Crear query con company_number y account_date
-                query = f"company number {company_number} account date {account_date}"
-                company_info = query_pinecone_and_summarize(query)
+                if source == "pinecone":
+                    query = f"company number {company_number} account date {account_date}"
+                    company_info = query_pinecone_and_summarize(query)
+                else:  # source == "api"
+                    company_info = self.fetch_company_info(company_number, account_date)
                 
                 if company_info:
                     break
-                
                 if attempt < max_retries - 1:
-                    logger.info(f"Retrying Pinecone query for {company_number} (attempt {attempt+1}/{max_retries})")
-                    time.sleep(self.delay_seconds * (attempt + 1))  # Espera incremental
+                    logger.info(f"Retrying {source} query for {company_number} (attempt {attempt+1}/{max_retries})")
+                    time.sleep(self.delay_seconds * (attempt + 1))
             
             # Si tenemos información, guardarla en MongoDB
             if company_info:
@@ -449,6 +450,13 @@ def main():
     parser.add_argument('--mongo-db', type=str, help='MongoDB database name')
     parser.add_argument('--retries', type=int, default=3, help='Maximum number of retries for API requests')
     parser.add_argument('--deduplicate', action='store_true', help='Run deduplication on results collection before processing')
+    parser.add_argument(
+        '--source',
+        type=str,
+        choices=['pinecone', 'api'],
+        default='pinecone',
+        help='Fuente de datos: "pinecone" (default) o "api" para usar la API externa'
+    )
     
     args = parser.parse_args()
     
@@ -467,9 +475,13 @@ def main():
             print("Running deduplication on results collection...")
             dedup_stats = processor.deduplicate_results()
             print(f"Deduplication complete: {dedup_stats['deleted']} duplicates removed")
-        
+            
         # Procesar archivos
-        stats = processor.process_files(limit=args.limit, max_retries=args.retries)
+        stats = processor.process_files(
+            limit=args.limit,
+            max_retries=args.retries,
+            source=args.source
+        )
         
         # Cerrar conexión a MongoDB
         processor.close()
@@ -487,10 +499,10 @@ def main():
         if stats['failed'] > 0:
             return 1
         return 0
-    
+        
     except Exception as e:
         logger.error(f"Unhandled exception: {e}", exc_info=True)
         return 1
-    
+
 if __name__ == "__main__":
     sys.exit(main()) 

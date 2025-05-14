@@ -488,8 +488,35 @@ def main():
                     return
                 
                 # Subir todos los archivos Parquet al S3
-                upload_results = s3_manager.upload_directory(PARQUET_DIR)
-                
+                upload_results = {}
+                for parquet_file in parquet_files:
+                    # Intentar inferir el nombre del ZIP de la ruta del archivo Parquet
+                    rel_path = os.path.relpath(parquet_file, PARQUET_DIR)
+                    parts = rel_path.split(os.sep)
+                    if len(parts) > 1:
+                        zip_name = parts[0]
+                        filename = parts[-1]
+                        s3_key = f"{s3_manager.prefix}{zip_name}/{filename}"
+                    else:
+                        s3_key = f"{s3_manager.prefix}{os.path.basename(parquet_file)}"
+
+                    # Validación previa: loggear el path S3 y existencia local
+                    logger.info(f"[PRE-UPLOAD] Archivo local: {parquet_file}")
+                    logger.info(f"[PRE-UPLOAD] S3 key destino: s3://{s3_manager.bucket_name}/{s3_key}")
+                    if not os.path.exists(parquet_file):
+                        logger.error(f"[PRE-UPLOAD] El archivo local no existe: {parquet_file}")
+                        upload_results[parquet_file] = False
+                        continue
+
+                    success = s3_manager.upload_file(parquet_file, s3_key=s3_key)
+                    upload_results[parquet_file] = success
+
+                    # Validación posterior: loggear resultado
+                    if success:
+                        logger.info(f"[POST-UPLOAD] Subida exitosa: s3://{s3_manager.bucket_name}/{s3_key}")
+                    else:
+                        logger.error(f"[POST-UPLOAD] Fallo al subir: s3://{s3_manager.bucket_name}/{s3_key}")
+
                 success_count = sum(1 for status in upload_results.values() if status)
                 if success_count == 0:
                     logger.error("Failed to upload any Parquet files to S3. Aborting import.")
@@ -527,23 +554,36 @@ def main():
             
             # Esperar y reportar estado de importación
             waiting_time = 0
+            unknown_count = 0
             while True:
                 time.sleep(10)
                 waiting_time += 10                
                 status = describe_import(operation_id)
-                state = status.get('state', 'UNKNOWN')
-                
-                if state in ['RUNNING', 'PENDING']:
-                    logger.info(f"Import in progress (waiting {waiting_time}s)... State: {state}")
-                elif state == 'COMPLETED':
-                    logger.info(f"Import completed successfully! Vectors imported: {status.get('vectors_imported', 'unknown')}")
+                state = status.get('status', 'UNKNOWN')
+                percent_complete = status.get('percent_complete', status.get('percent_complete', 'N/A'))
+                records_imported = status.get('records_imported', 'N/A')
+                logger.info(f"Estado importación actual: ID: {operation_id} | Estado: {state} | %: {percent_complete} | Registros importados: {records_imported}")
+
+                # Si el estado es 'Completed' o 'Complete' o el porcentaje es 100, termina exitosamente
+                if str(state).lower() in ['completed', 'complete'] or str(percent_complete) in ['100', '100.0']:
+                    logger.info(f"Import completed successfully! ID: {operation_id} | Estado: {state} | %: {percent_complete} | Registros importados: {records_imported}")
+                    next_stage_scrapping()
                     break
+                elif state in ['RUNNING', 'PENDING']:
+                    unknown_count = 0
                 elif state in ['FAILED', 'CANCELLED']:
-                    logger.error(f"Import failed or was cancelled. State: {state}, Error: {status.get('error', 'unknown')}")
+                    logger.error(f"Import failed or was cancelled. ID: {operation_id} | Estado: {state} | %: {percent_complete} | Registros importados: {records_imported}")
                     break
                 elif state == 'NOT_CONFIGURED':
                     logger.error("Pinecone no está configurado correctamente. Verifica las variables de entorno.")
                     break
+                elif state == 'UNKNOWN':
+                    unknown_count += 1
+                    if unknown_count == 1:
+                        logger.warning(f"Unknown import state: {state}. Puede que la operación ya haya finalizado. Revisa la consola de Pinecone para confirmar el estado real.")
+                    if unknown_count >= 3:
+                        logger.warning("Import state sigue siendo UNKNOWN tras varios intentos. Saliendo del bucle para evitar spam en el log. Revisa la consola de Pinecone para el estado final.")
+                        break
                 else:
                     logger.warning(f"Unknown import state: {state}")
                     if waiting_time > 300:  # 5 minutos máximo de espera
@@ -559,6 +599,9 @@ def main():
         logger.info("Conexión a MongoDB cerrada")
     
     logger.info("XBRL to Pinecone process completed")
+
+def next_stage_scrapping():
+    print("[STAGE] Iniciando siguiente etapa: scrapping (placeholder)")
 
 if __name__ == "__main__":
     main()

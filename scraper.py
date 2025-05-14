@@ -80,11 +80,7 @@ class XBRLScraper:
                             # Es una ruta absoluta desde la raíz del dominio
                             full_url = urljoin(self.base_url, href)
                         else:
-                            # Es una ruta relativa - verificar si debería ir en /archive/
-                            if not href.startswith('archive/'):
-                                # Añadir directorio archive si no está incluido
-                                full_url = urljoin(self.base_url, f"archive/{href}")
-                            else:
+                            # No anteponer 'archive/' si no corresponde
                                 full_url = urljoin(self.base_url, href)
                         
                         # Extract year and month if possible for better logging
@@ -118,6 +114,14 @@ class XBRLScraper:
             # Ordenar por año y mes (del más reciente al más antiguo)
             zip_links.sort(key=lambda x: x['year_month'], reverse=True)
             
+            # FILTRO TEMPORAL: solo dejar el enlace 'Accounts_Monthly_Data-od22.zip'
+            filtered_zip_links = [link for link in zip_links if 'Accounts_Monthly_Data-od22.zip' in link['url']]
+            if filtered_zip_links:
+                logger.info("Filtro temporal activo: solo se tomará 'Accounts_Monthly_Data-od22.zip'")
+                zip_links = filtered_zip_links
+            else:
+                logger.warning("No se encontró el enlace 'Accounts_Monthly_Data-od22.zip' entre los resultados.")
+
             for zip_link in zip_links:
                 logger.info(f"Found ZIP: {zip_link['year_month']} - {zip_link['size']} - {zip_link['url']}")
                 

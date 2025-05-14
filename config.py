@@ -24,9 +24,9 @@ load_dotenv()
 
 # Pinecone configuration
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "your_pinecone_api_key")
-INDEX_HOST = os.getenv("INDEX_HOST", "your_index_host")
-S3_URI = os.getenv("S3_URI", "s3://your_bucket/path/to/namespaces/")
-INTEGRATION_ID = os.getenv("INTEGRATION_ID", "")
+INDEX_HOST = os.getenv("PINECONE_INDEX_HOST", "your_index_host")
+S3_URI = os.getenv("S3_URI", "s3://pyrocodefi/MONTH/TO/NAMESPACES")
+INTEGRATION_ID = os.getenv("INTEGRATION_ID", "7dd9da09-2cc0-4418-a2c4-f69f7ef13f20")
 
 # S3 configuration
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")

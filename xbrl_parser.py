@@ -345,9 +345,11 @@ class XBRLParser:
                 logger.warning(f"Skipping large file ({file_size_mb:.2f} MB): {file_path}")
                 return None
                 
-            # Generate a Parquet file path before parsing
-            file_name = os.path.basename(file_path).split('.')[0]
-            parquet_file = os.path.join(self.output_dir, f"{file_name}.parquet")
+            # Obtener el nombre del ZIP desde el path del archivo extraído (padre del padre)
+            zip_folder = os.path.basename(os.path.dirname(os.path.dirname(file_path)))
+            output_subdir = os.path.join(self.output_dir, zip_folder)
+            os.makedirs(output_subdir, exist_ok=True)
+            parquet_file = os.path.join(output_subdir, f"{os.path.basename(file_path).split('.')[0]}.parquet")
             
             # Skip if output file already exists
             if os.path.exists(parquet_file):
@@ -435,7 +437,7 @@ class XBRLParser:
                             total_remuneration = total_match.group(0)
                 
                 # Generar un ID único para el documento
-                doc_id = hashlib.md5(file_name.encode()).hexdigest()
+                doc_id = hashlib.md5(os.path.basename(file_path).encode()).hexdigest()
                 
                 # Generar vector para el documento completo
                 vector = self._generate_vector(document_data['full_text'][:32000])
@@ -449,7 +451,7 @@ class XBRLParser:
                 metadata_size = len(metadata_json.encode('utf-8'))
                 
                 # Log detallado del tamaño de metadatos
-                logger.info(f"Metadata size for {file_name}: {metadata_size} bytes")
+                logger.info(f"Metadata size for {os.path.basename(file_path)}: {metadata_size} bytes")
                 logger.info(f"Full text length: {len(structured_metadata.get('full_text', ''))}")
                 
                 records = []
