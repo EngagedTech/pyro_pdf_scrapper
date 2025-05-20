@@ -6,6 +6,7 @@ import logging
 import argparse
 import os
 import sys
+import subprocess
 
 # Intenta importar dependencias mínimas
 try:
@@ -14,6 +15,20 @@ except ImportError as e:
     print("❌ Error al importar módulos básicos:", e)
     print("   Instala las dependencias mínimas con: pip install python-dotenv")
     sys.exit(1)
+
+# Cargar variables de entorno y verificar
+from dotenv import load_dotenv, find_dotenv
+# Forzar recarga del .env más cercano
+dotenv_path = find_dotenv()
+print(f"\n[DEBUG] Usando archivo .env: {dotenv_path}")
+load_dotenv(dotenv_path, override=True)
+
+# Debug: Imprimir variables de entorno relevantes
+print("\n[DEBUG] Variables de entorno cargadas:")
+print(f"EXECUTION_STAGE: {os.getenv('EXECUTION_STAGE')}")
+print(f"LIST_URL: {os.getenv('LIST_URL')}")
+print(f"BASE_URL: {os.getenv('BASE_URL')}")
+print(f"SCRAPER_URL: {os.getenv('SCRAPER_URL')}\n")
 
 # Variables para controlar la disponibilidad de módulos
 scraper_available = False
@@ -103,7 +118,7 @@ def parse_args():
         parser.add_argument('--import-only', action='store_true', default=IMPORT_ONLY,
                             help='Skip scraping and only import existing Parquet files to Pinecone')
         parser.add_argument('--url', type=str, default=SCRAPER_URL,
-                            help='URL to scrape XBRL ZIP files from')
+                            help='URL to scrape XBRL ZIP files from (default: from .env SCRAPER_URL)')
         parser.add_argument('--max-zips', type=int, default=MAX_FILES_TO_DOWNLOAD,
                             help='Maximum number of ZIP files to download')
         parser.add_argument('--max-files', type=int, default=MAX_FILES_TO_PARSE,
@@ -121,17 +136,17 @@ def parse_args():
         parser.add_argument('--use-mongodb', action='store_true', default=True,
                             help='Use MongoDB to track conversions and store results')
         parser.add_argument('--stage', type=str, default=EXECUTION_STAGE, 
-                            choices=['download', 'extract', 'parse', 'upload', 'import'],
+                            choices=['download', 'extract', 'parse', 'upload', 'import', 'api'],
                             help='Execution stage to reach before stopping')
     else:
-        # Sin config, valores por defecto hardcoded
+        # Sin config, usar valores del .env directamente
         parser.add_argument('--scrape-only', action='store_true', default=False,
                             help='Only scrape and extract XBRL files, without importing to Pinecone')
         parser.add_argument('--import-only', action='store_true', default=False,
                             help='Skip scraping and only import existing Parquet files to Pinecone')
         parser.add_argument('--url', type=str, 
-                            default="https://download.companieshouse.gov.uk/historicmonthlyaccountsdata.html",
-                            help='URL to scrape XBRL ZIP files from')
+                            default=os.getenv('SCRAPER_URL', ''),
+                            help='URL to scrape XBRL ZIP files from (default: from .env SCRAPER_URL)')
         parser.add_argument('--max-zips', type=int, default=3,
                             help='Maximum number of ZIP files to download')
         parser.add_argument('--max-files', type=int, default=100,
@@ -289,8 +304,8 @@ def main():
             try:
                 scraper = XBRLScraper(
                     base_url=BASE_URL if config_loaded else "https://download.companieshouse.gov.uk/",
-                    list_url=scrape_url,
-                    download_dir=DOWNLOAD_DIR if config_loaded else "downloads"
+                    list_url=scrape_url or os.getenv('SCRAPER_URL', ''),
+                    download_dir=os.getenv('DOWNLOAD_DIR', 'downloads')
                 )
                 
                 # Find all ZIP links
@@ -567,7 +582,25 @@ def main():
                 # Si el estado es 'Completed' o 'Complete' o el porcentaje es 100, termina exitosamente
                 if str(state).lower() in ['completed', 'complete'] or str(percent_complete) in ['100', '100.0']:
                     logger.info(f"Import completed successfully! ID: {operation_id} | Estado: {state} | %: {percent_complete} | Registros importados: {records_imported}")
-                    next_stage_scrapping()
+                    try:
+                        logger.info("[STAGE] Iniciando siguiente etapa: Procesamiento API / Pinecone (ejecutando api_processor.py --source api)")
+                        env = os.environ.copy()
+                        env["PIPELINE_PARENT"] = "main.py"
+                        process = subprocess.Popen(
+                            ['python3', 'api_processor.py', '--source', 'api'],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            env=env
+                        )
+                        # Leer y reenviar la salida en tiempo real
+                        for line in process.stdout:
+                            logger.info(f"[api_processor] {line.rstrip()}")
+                        process.wait()
+                        logger.info(f"api_processor.py return code: {process.returncode}")
+                        logger.info("Subproceso finalizado.")
+                    except Exception as e:
+                        logger.error(f"Error al ejecutar api_processor.py: {e}")
                     break
                 elif state in ['RUNNING', 'PENDING']:
                     unknown_count = 0
@@ -600,8 +633,32 @@ def main():
     
     logger.info("XBRL to Pinecone process completed")
 
-def next_stage_scrapping():
-    print("[STAGE] Iniciando siguiente etapa: scrapping (placeholder)")
+    # Nuevo: Si el stage es 'api', ejecuta solo el procesamiento final y termina
+    if stage == 'api':
+        logger.info("[STAGE] Ejecutando solo el procesamiento API / Pinecone (api_processor.py --source api)")
+        if not os.path.exists("api_processor.py"):
+            logger.error("api_processor.py no se encuentra en el directorio actual.")
+            return
+        try:
+            logger.info("Lanzando subproceso api_processor.py...")
+            env = os.environ.copy()
+            env["PIPELINE_PARENT"] = "main.py"
+            process = subprocess.Popen(
+                ['python3', 'api_processor.py', '--source', 'api'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env
+            )
+            # Leer y reenviar la salida en tiempo real
+            for line in process.stdout:
+                logger.info(f"[api_processor] {line.rstrip()}")
+            process.wait()
+            logger.info(f"api_processor.py return code: {process.returncode}")
+            logger.info("Subproceso finalizado.")
+        except Exception as e:
+            logger.error(f"Error al ejecutar api_processor.py: {e}")
+        return
 
 if __name__ == "__main__":
     main()

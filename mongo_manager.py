@@ -136,40 +136,76 @@ class MongoManager:
                 - highest_paid_director (dict with name and remuneration)
                 - total_director_remuneration
                 - currency
+                - zip_name
         
         Returns:
             bool: True if successful, False otherwise
         """
-        if not result_data.get("company_number"):
-            logger.error("Cannot insert result without company_number")
-            return False
+        company_number = result_data.get("company_number")
+        company_name = result_data.get("company_name", "")
         
-        try:
-            # Format for MongoDB storage
-            document = {
-                "company_number": result_data.get("company_number"),
-                "company_name": result_data.get("company_name", ""),
-                "company_legal_type": result_data.get("company_legal_type", ""),
-                "accounts_date": result_data.get("accounts_date", ""),
-                "highest_paid_director": result_data.get("highest_paid_director", {"name": "", "remuneration": ""}),
-                "total_director_remuneration": result_data.get("total_director_remuneration", ""),
-                "currency": result_data.get("currency", "GBP"),
-                "inserted_at": datetime.now(),
-                "updated_at": datetime.now()
+        # Asegurar que accounts_date sea una lista
+        accounts_date = result_data.get("accounts_date", [])
+        if not isinstance(accounts_date, list):
+            accounts_date = [accounts_date] if accounts_date else []
+        
+        # Procesar cada entrada de accounts_date
+        processed_accounts = []
+        for acc in accounts_date:
+            if not isinstance(acc, dict):
+                continue
+                
+            entry = {
+                "zip_name": acc.get("zip_name", ""),  # Mantener zip_name de la entrada
+                "date": acc.get("date", ""),
+                "company_legal_type": acc.get("company_legal_type", ""),
+                "currency": acc.get("currency", "GBP"),
+                "total_director_remuneration": acc.get("total_director_remuneration", ""),
+                "highest_paid_director": acc.get("highest_paid_director", ""),
+                "inserted_at": datetime.now()
             }
-            
-            # Use upsert to update if exists, insert if not
-            result = self.results_collection.update_one(
-                {"company_number": document["company_number"]},
-                {"$set": document},
-                upsert=True
-            )
-            
-            if result.upserted_id:
-                logger.info(f"Inserted new company data: {document['company_number']}")
+            processed_accounts.append(entry)
+
+        try:
+            existing = self.results_collection.find_one({"company_number": company_number})
+            if existing:
+                # Actualizar entradas existentes o añadir nuevas
+                existing_accounts = existing.get("accounts_date", [])
+                for new_acc in processed_accounts:
+                    # Buscar entrada existente con mismo zip_name y date
+                    found = False
+                    for existing_acc in existing_accounts:
+                        if (existing_acc.get("zip_name") == new_acc["zip_name"] and 
+                            existing_acc.get("date") == new_acc["date"]):
+                            existing_acc.update(new_acc)
+                            found = True
+                            break
+                    if not found:
+                        existing_accounts.append(new_acc)
+                
+                # Actualizar documento
+                self.results_collection.update_one(
+                    {"company_number": company_number},
+                    {
+                        "$set": {
+                            "company_name": company_name,
+                            "accounts_date": existing_accounts,
+                            "updated_at": datetime.now()
+                        }
+                    }
+                )
             else:
-                logger.info(f"Updated existing company data: {document['company_number']}")
+                # Crear nuevo documento
+                doc = {
+                    "company_number": company_number,
+                    "company_name": company_name,
+                    "accounts_date": processed_accounts,
+                    "created_at": datetime.now(),
+                    "updated_at": datetime.now()
+                }
+                self.results_collection.insert_one(doc)
             
+            logger.info(f"Successfully stored/updated data for company {company_number}")
             return True
             
         except PyMongoError as e:
@@ -194,38 +230,27 @@ class MongoManager:
             return None
     
     # Methods for conversions collection
-    def register_file_conversion(self, filename: str, account_date: str, company_number: str) -> bool:
+    def register_file_conversion(self, filename: str, account_date: str, company_number: str, zip_name: str = "") -> bool:
         """
-        Register a file for conversion tracking
-        
-        Args:
-            filename (str): HTML filename
-            account_date (str): Account date (e.g., "2023-12-31")
-            company_number (str): Company number
-            
-        Returns:
-            bool: True if successful, False otherwise
+        Register a file for conversion tracking, now with zip_name.
         """
         try:
             document = {
                 "filename": filename,
                 "account_date": account_date,
                 "company_number": company_number,
+                "zip_name": zip_name,
                 "status": "pending",
                 "created_at": datetime.now(),
                 "updated_at": datetime.now()
             }
-            
-            # Use upsert in case the file was already registered
             result = self.conversions_collection.update_one(
                 {"filename": filename},
                 {"$set": document},
                 upsert=True
             )
-            
-            logger.info(f"Registered file conversion: {filename}")
+            logger.info(f"Registered file conversion: {filename} (zip_name={zip_name})")
             return True
-            
         except PyMongoError as e:
             logger.error(f"Failed to register file conversion: {e}")
             return False

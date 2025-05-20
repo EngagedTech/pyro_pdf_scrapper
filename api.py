@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 import uvicorn
 import asyncio
 from download_service import DownloadService
@@ -11,6 +11,7 @@ import os
 import subprocess
 from contextlib import asynccontextmanager
 import socket
+from xbrl_worker import XBRLProcessor
 
 # Cargar variables de entorno
 load_dotenv()
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 # Inicializar servicios
 download_service = DownloadService()
+xbrl_processor = XBRLProcessor()
+
+class CachePattern(BaseModel):
+    pattern: Optional[str] = None
 
 def is_port_in_use(port: int) -> bool:
     """Check if a port is in use"""
@@ -109,6 +114,43 @@ async def start_processing() -> Dict:
         
     except Exception as e:
         logger.error(f"Error en el procesamiento: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/clear-cache")
+async def clear_cache(cache_pattern: CachePattern = None) -> Dict:
+    """
+    Endpoint para limpiar la caché de Redis
+    
+    Args:
+        cache_pattern: Patrón opcional para limpiar caché específica
+    """
+    try:
+        pattern = cache_pattern.pattern if cache_pattern else None
+        xbrl_processor.clear_cache(pattern)
+        return {
+            "status": "success",
+            "message": f"Cache cleared successfully{f' for pattern: {pattern}' if pattern else ''}"
+        }
+    except Exception as e:
+        logger.error(f"Error clearing cache: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/clear-file-cache/{file_path:path}")
+async def clear_file_cache(file_path: str) -> Dict:
+    """
+    Endpoint para limpiar la caché de un archivo específico
+    
+    Args:
+        file_path: Ruta del archivo para limpiar su caché
+    """
+    try:
+        xbrl_processor.clear_file_cache(file_path)
+        return {
+            "status": "success",
+            "message": f"Cache cleared for file: {file_path}"
+        }
+    except Exception as e:
+        logger.error(f"Error clearing file cache: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

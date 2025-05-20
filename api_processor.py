@@ -21,7 +21,7 @@ from query_processor import query_pinecone_and_summarize
 # Cargar variables de entorno
 load_dotenv()
 
-# Configurar logging
+# Configurar logging según el contexto de ejecución
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -81,10 +81,8 @@ class APIProcessor:
             
             # Create a MongoDB client with authentication if credentials are provided
             if username and password and 'mongodb+srv' in self.mongo_uri:
-                # For MongoDB Atlas or other services that use srv format
                 self.client = MongoClient(self.mongo_uri)
             elif username and password:
-                # For standalone MongoDB with authentication
                 auth_source = os.environ.get("MONGO_AUTH_SOURCE", "admin")
                 self.client = MongoClient(
                     self.mongo_uri,
@@ -93,7 +91,6 @@ class APIProcessor:
                     authSource=auth_source
                 )
             else:
-                # No authentication
                 self.client = MongoClient(self.mongo_uri)
             
             # Ping the database to check connection
@@ -105,6 +102,25 @@ class APIProcessor:
             # Initialize collections
             self.conversions_collection = self.db["conversions"]
             self.results_collection = self.db["results"]
+            
+            # Crear índices únicos para evitar duplicados
+            self.results_collection.create_index(
+                [("company_number", 1)],
+                unique=True,
+                background=True
+            )
+            self.results_collection.create_index(
+                [
+                    ("company_number", 1),
+                    ("accounts_date.zip_name", 1),
+                    ("accounts_date.date", 1)
+                ],
+                unique=True,
+                background=True,
+                partialFilterExpression={
+                    "accounts_date": {"$exists": True}
+                }
+            )
             
             logger.info(f"Successfully connected to MongoDB: {self.mongo_db_name}")
             
@@ -162,6 +178,8 @@ class APIProcessor:
             for file in files:
                 if 'company_number' in file:
                     file['company_number'] = self._normalize_company_number(file['company_number'])
+                # Asegura que zip_name esté presente (puede estar vacío si no se propagó antes)
+                file['zip_name'] = file.get('zip_name', '')
             
             return files
             
@@ -173,53 +191,99 @@ class APIProcessor:
         """
         Obtiene información de la compañía desde la API externa.
         """
+        def normalize_api_response(data):
+            """
+            Normaliza la respuesta de la API para extraer la información de la empresa,
+            soportando tanto el formato antiguo (company_info) como el nuevo (estructura directa).
+            Siempre retorna accounts_date como lista de objetos planos, con 'date' como string.
+            """
+            # Caso 1: Formato antiguo
+            if data.get("success") and "company_info" in data:
+                return data["company_info"]
+            # Caso 2: Formato directo (sin company_info)
+            if "company_name" in data and "company_number" in data:
+                accounts_date = data.get("accounts_date")
+                flat_accounts = []
+                if isinstance(accounts_date, list) and len(accounts_date) > 0:
+                    for acc in accounts_date:
+                        # Si acc['date'] es lista, aplanar
+                        if isinstance(acc.get("date"), list):
+                            for d in acc["date"]:
+                                merged = {**acc, **d}
+                                merged.pop("date", None)  # Evita recursión
+                                # Fuerza date a string plano, usando d['date'] si existe
+                                date_value = d.get("date", "") if isinstance(d, dict) else str(d)
+                                if isinstance(date_value, (list, dict)):
+                                    date_value = str(date_value)
+                                flat_accounts.append({
+                                    "zip_name": merged.get("zip_name", ""),
+                                    "date": date_value,
+                                    "company_legal_type": merged.get("company_legal_type", ""),
+                                    "currency": merged.get("currency", ""),
+                                    "total_director_remuneration": merged.get("total_director_remuneration", ""),
+                                    "highest_paid_director": merged.get("highest_paid_director", ""),
+                                    "inserted_at": merged.get("inserted_at", datetime.now())
+                                })
+                        else:
+                            date_value = acc.get("date", "")
+                            if isinstance(date_value, (list, dict)):
+                                date_value = str(date_value)
+                            flat_accounts.append({
+                                "zip_name": acc.get("zip_name", ""),
+                                "date": date_value,
+                                "company_legal_type": acc.get("company_legal_type", ""),
+                                "currency": acc.get("currency", ""),
+                                "total_director_remuneration": acc.get("total_director_remuneration", ""),
+                                "highest_paid_director": acc.get("highest_paid_director", ""),
+                                "inserted_at": acc.get("inserted_at", datetime.now())
+                            })
+                    data["accounts_date"] = flat_accounts
+                return {
+                    "company_name": data.get("company_name", ""),
+                    "company_number": data.get("company_number", ""),
+                    "accounts_date": data.get("accounts_date", [])
+                }
+            # Si no cumple, retorna None
+            return None
         try:
             # Mantener el company_number en su formato original
             company_number = company_number.strip()
-            
             # Construir la URL de la API
             url = f"{self.api_base_url}/company/extract/"
-            
             # Hacer la petición a la API
             response = requests.get(
                 url,
                 params={"company_number": company_number, "account_date": account_date},
                 timeout=30
             )
-            
             # Esperar explícitamente a que se descargue todo el contenido
             content = response.content
-            
             # Verificar respuesta exitosa
             if response.status_code == 200:
                 # Verificar que la respuesta sea un JSON válido
                 try:
                     data = response.json()
+                    print(f"[DEBUG] API raw response for {company_number}: {data}")
+                    logger.info(f"[DEBUG] API raw response for {company_number}: {data}")
                 except ValueError as e:
                     logger.error(f"Invalid JSON response from API for company {company_number}: {e}")
                     logger.debug(f"Response content: {content[:500]}...")  # Log primeros 500 caracteres
                     return None
-                
-                # Verificar si la respuesta contiene company_info
-                if data.get("success") and "company_info" in data:
-                    company_info = data["company_info"]
-                    
+                # Normaliza la respuesta
+                company_info = normalize_api_response(data)
+                if company_info:
                     # Normalizar el company_number en la respuesta
                     if "company_number" in company_info:
                         company_info["company_number"] = self._normalize_company_number(company_info["company_number"])
-                    
                     logger.info(f"Successfully fetched info for company {company_number}")
                     return company_info
                 else:
-                    logger.warning(f"API response for company {company_number} does not contain company_info")
-                    if "meta" in data:
-                        logger.info(f"API response metadata: {data['meta']}")
+                    logger.warning(f"API response for company {company_number} does not contain recognizable company info")
                     logger.debug(f"Full API response: {data}")
                     return None
             else:
                 logger.warning(f"API request failed with status {response.status_code}: {response.text}")
                 return None
-                
         except requests.exceptions.Timeout as e:
             logger.error(f"Timeout while fetching company info for {company_number}: {e}")
             return None
@@ -239,208 +303,142 @@ class APIProcessor:
     def store_company_info(self, company_info: Dict[str, Any]) -> bool:
         """
         Store company information in MongoDB results collection
-        
-        Args:
-            company_info (dict): Company information from API
-            
-        Returns:
-            bool: True if successful, False otherwise
         """
         try:
-            # Verificar que tenemos company_number
-            company_number = company_info.get("company_number")
+            company_number = company_info.get("company_number", "").strip()
             if not company_number:
                 logger.error("Cannot store company info without company_number")
                 return False
-            
-            # Mantener el formato original del company_number
-            company_number = company_number.strip()
-            company_info["company_number"] = company_number
-            
-            # Añadir timestamps
-            document = {
-                **company_info,
-                "updated_at": datetime.now()
+
+            # Normalizar estructura una sola vez
+            normalized_doc = {
+                "company_number": company_number,
+                "company_name": company_info.get("company_name", ""),
+                "accounts_date": []
             }
-            
-            # Verificar si ya existe un documento con este company_number normalizado
-            existing = self.results_collection.find_one({"company_number": company_number})
-            
-            # Si es un nuevo documento, añadir inserted_at
-            if not existing:
-                document["inserted_at"] = datetime.now()
-            
-            # Upsert para actualizar si existe, insertar si no
-            result = self.results_collection.update_one(
+
+            # Procesar accounts_date
+            accounts = company_info.get("accounts_date", [])
+            if not isinstance(accounts, list):
+                accounts = [accounts]
+
+            current_time = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+            for acc in accounts:
+                if not isinstance(acc, dict):
+                    continue
+                
+                # Normalizar fecha a formato ISO
+                date = acc.get("date", "")
+                if date and "/" in date:
+                    try:
+                        day, month, year = date.split("/")
+                        date = f"{year}-{month}-{day}"
+                    except ValueError:
+                        logger.warning(f"Invalid date format: {date}")
+                
+                entry = {
+                    "zip_name": acc.get("zip_name", ""),
+                    "date": date,
+                    "company_legal_type": acc.get("company_legal_type", ""),
+                    "currency": acc.get("currency", "GBP"),
+                    "total_director_remuneration": acc.get("total_director_remuneration", ""),
+                    "highest_paid_director": str(acc.get("highest_paid_director", "")),
+                    "inserted_at": current_time
+                }
+                normalized_doc["accounts_date"].append(entry)
+
+            # Actualizar o insertar usando upsert
+            self.results_collection.update_one(
                 {"company_number": company_number},
-                {"$set": document},
+                {
+                    "$set": {
+                        "company_name": normalized_doc["company_name"],
+                        "updated_at": current_time
+                    },
+                    "$addToSet": {
+                        "accounts_date": {
+                            "$each": normalized_doc["accounts_date"]
+                        }
+                    }
+                },
                 upsert=True
             )
-            
-            if result.upserted_id:
-                logger.info(f"Inserted new company data: {company_number}")
-            else:
-                logger.info(f"Updated existing company data: {company_number}")
-            
+
             return True
             
         except PyMongoError as e:
             logger.error(f"Failed to store company info: {e}")
             return False
-    
-    def deduplicate_results(self) -> Dict[str, int]:
-        """
-        Elimina duplicados en la colección results por company_number
-        
-        Returns:
-            dict: Estadísticas de la operación de deduplicación
-        """
-        stats = {
-            "examined": 0,
-            "normalized": 0,
-            "deleted": 0
-        }
-        
-        try:
-            # Obtener todos los documentos de results
-            all_results = list(self.results_collection.find({}))
-            stats["examined"] = len(all_results)
-            logger.info(f"Examining {len(all_results)} documents for duplicates")
-            
-            # Diccionario para seguir los IDs a mantener por company_number normalizado
-            keep_ids = {}
-            delete_ids = []
-            
-            # Primera pasada: identificar duplicados
-            for doc in all_results:
-                company_number = doc.get("company_number", "")
-                if not company_number:
-                    continue
-                    
-                normalized = self._normalize_company_number(company_number)
-                
-                # Si el número de compañía necesita normalización
-                if company_number != normalized:
-                    stats["normalized"] += 1
-                
-                # Si ya tenemos un documento con este company_number normalizado
-                if normalized in keep_ids:
-                    # Si el documento actual es más reciente, mantenerlo en lugar del anterior
-                    existing_doc = next((d for d in all_results if d["_id"] == keep_ids[normalized]), None)
-                    
-                    if existing_doc and "updated_at" in doc and "updated_at" in existing_doc:
-                        if doc["updated_at"] > existing_doc["updated_at"]:
-                            delete_ids.append(keep_ids[normalized])
-                            keep_ids[normalized] = doc["_id"]
-                        else:
-                            delete_ids.append(doc["_id"])
-                    else:
-                        delete_ids.append(doc["_id"])
-                else:
-                    # Este es el primer documento con este company_number normalizado
-                    keep_ids[normalized] = doc["_id"]
-            
-            # Segunda pasada: eliminar duplicados
-            for doc_id in delete_ids:
-                self.results_collection.delete_one({"_id": doc_id})
-            
-            stats["deleted"] = len(delete_ids)
-            logger.info(f"Deduplication complete: {stats['deleted']} duplicates removed, {stats['normalized']} numbers normalized")
-            
-            return stats
-            
-        except PyMongoError as e:
-            logger.error(f"Error during deduplication: {e}")
-            return stats
-    
+
     def process_files(self, limit: int = None, max_retries: int = 3, source: str = "pinecone") -> Dict[str, int]:
-        """
-        Process files and update MongoDB
-        
-        Args:
-            limit (int, optional): Maximum number of files to process
-            max_retries (int): Maximum number of retries for API requests
-            source (str): Source of data: "pinecone" or "api"
-            
-        Returns:
-            dict: Statistics about processing
-        """
-        # Obtener archivos a procesar
+        """Process files and update MongoDB"""
         files = self.get_processed_files(limit)
-        
         if not files:
             logger.warning("No processed files found to process")
-            return {"total": 0, "success": 0, "failed": 0, "skipped": 0}
+            return {"total": 0, "success": 0, "failed": 0}
+
+        stats = {"total": len(files), "success": 0, "failed": 0}
         
-        # Inicializar estadísticas
-        stats = {
-            "total": len(files),
-            "success": 0,
-            "failed": 0,
-            "skipped": 0
-        }
-        
-        # Procesar archivos con barra de progreso
-        logger.info(f"Starting to process {len(files)} files")
         for file in tqdm(files, desc="Processing files"):
-            # Extraer company_number y account_date
             company_number = file.get("company_number", "")
             account_date = file.get("account_date", "")
+            zip_name = file.get("zip_name", "")  # Obtener el zip_name del archivo
+            print(f"[DEBUG] Processing zip name: {zip_name}")
             
-            # Verificar si tenemos datos necesarios
             if not company_number or not account_date:
-                logger.warning(f"Skipping file {file.get('filename')}: Missing company_number or account_date")
-                stats["skipped"] += 1
+                logger.warning(f"Skipping file: Missing company_number or account_date")
                 continue
-            
-            # Formatear account_date si es necesario (de DD/MM/YYYY a YYYY-MM-DD)
-            if "/" in account_date:
-                try:
-                    day, month, year = account_date.split("/")
-                    account_date = f"{year}-{month}-{day}"
-                except ValueError:
-                    logger.warning(f"Invalid account_date format: {account_date}")
-            
-            # Intentar obtener información de la compañía con reintentos
+
+            # Obtener información (con reintentos)
             company_info = None
             for attempt in range(max_retries):
-                if source == "pinecone":
-                    query = f"company number {company_number} account date {account_date}"
-                    company_info = query_pinecone_and_summarize(query)
-                else:  # source == "api"
-                    company_info = self.fetch_company_info(company_number, account_date)
-                
-                if company_info:
-                    break
-                if attempt < max_retries - 1:
-                    logger.info(f"Retrying {source} query for {company_number} (attempt {attempt+1}/{max_retries})")
-                    time.sleep(self.delay_seconds * (attempt + 1))
-            
-            # Si tenemos información, guardarla en MongoDB
-            if company_info:
-                success = self.store_company_info(company_info)
-                if success:
-                    stats["success"] += 1
-                else:
-                    stats["failed"] += 1
+                try:
+                    if source == "pinecone":
+                        query = f"company number {company_number} account date {account_date}"
+                        company_info = query_pinecone_and_summarize(query)
+                        
+                        # Si no hay zip_name en la respuesta, forzarlo
+                        if company_info:
+                            if not isinstance(company_info.get("accounts_date"), list):
+                                company_info["accounts_date"] = [company_info.get("accounts_date", {})]
+                            
+                            for acc in company_info["accounts_date"]:
+                                if isinstance(acc, dict):
+                                    # Siempre usar el zip_name del archivo original
+                                    acc["zip_name"] = zip_name
+                    else:
+                        company_info = self.fetch_company_info(company_number, account_date)
+                        if company_info:
+                            if not isinstance(company_info.get("accounts_date"), list):
+                                company_info["accounts_date"] = [company_info.get("accounts_date", {})]
+                            
+                            for acc in company_info["accounts_date"]:
+                                if isinstance(acc, dict):
+                                    acc["zip_name"] = zip_name
+                    
+                    if company_info:
+                        break
+                except Exception as e:
+                    logger.error(f"Error in attempt {attempt + 1}: {str(e)}")
+                    if attempt < max_retries - 1:
+                        time.sleep(self.delay_seconds * (attempt + 1))
+
+            if company_info and self.store_company_info(company_info):
+                stats["success"] += 1
             else:
-                logger.warning(f"Could not fetch company info for {company_number} after {max_retries} attempts")
                 stats["failed"] += 1
-            
-            # Pausa entre solicitudes para evitar límites de tasa
+                logger.warning(f"Failed to process company {company_number}")
+
             time.sleep(self.delay_seconds)
-        
-        # Resumen de procesamiento
-        logger.info(f"Processing completed: {stats['success']} successful, {stats['failed']} failed, {stats['skipped']} skipped")
+
+        logger.info(f"Processing completed: {stats['success']} successful, {stats['failed']} failed")
         return stats
 
 def main():
-    """
-    Main function to run as standalone script
-    """
+    """Main function to run as standalone script"""
     import argparse
     
-    # Configurar parser de argumentos
     parser = argparse.ArgumentParser(description='Process XBRL files via API and update MongoDB')
     parser.add_argument('--limit', type=int, default=None, help='Maximum number of files to process')
     parser.add_argument('--batch-size', type=int, default=50, help='Number of records to process in a batch')
@@ -449,7 +447,6 @@ def main():
     parser.add_argument('--mongo-uri', type=str, help='MongoDB connection string')
     parser.add_argument('--mongo-db', type=str, help='MongoDB database name')
     parser.add_argument('--retries', type=int, default=3, help='Maximum number of retries for API requests')
-    parser.add_argument('--deduplicate', action='store_true', help='Run deduplication on results collection before processing')
     parser.add_argument(
         '--source',
         type=str,
@@ -461,7 +458,6 @@ def main():
     args = parser.parse_args()
     
     try:
-        # Inicializar procesador de API
         processor = APIProcessor(
             api_base_url=args.api_url,
             mongo_uri=args.mongo_uri,
@@ -470,35 +466,20 @@ def main():
             delay_seconds=args.delay
         )
         
-        # Ejecutar deduplicación si se solicita
-        if args.deduplicate:
-            print("Running deduplication on results collection...")
-            dedup_stats = processor.deduplicate_results()
-            print(f"Deduplication complete: {dedup_stats['deleted']} duplicates removed")
-            
-        # Procesar archivos
         stats = processor.process_files(
             limit=args.limit,
             max_retries=args.retries,
             source=args.source
         )
         
-        # Cerrar conexión a MongoDB
         processor.close()
         
-        # Resumen final
         print(f"\nProcessing Summary:")
         print(f"  Total files: {stats['total']}")
         print(f"  Successfully processed: {stats['success']}")
         print(f"  Failed: {stats['failed']}")
-        print(f"  Skipped: {stats['skipped']}")
-        if stats['total'] > 0:
-            print(f"  Success rate: {stats['success']/stats['total']*100:.2f}%")
         
-        # Código de salida basado en éxito/fallo
-        if stats['failed'] > 0:
-            return 1
-        return 0
+        return 1 if stats['failed'] > 0 else 0
         
     except Exception as e:
         logger.error(f"Unhandled exception: {e}", exc_info=True)

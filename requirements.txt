@@ -42,3 +42,9 @@ uvicorn==0.27.1
 python-multipart==0.0.9
 aiofiles==23.2.1
 httpx==0.26.0
+
+
+[DEBUG] API raw response for 00039177: 
+{'company_name': 'THE WHITE RIBBON ASSOCIATION INCORPORATED', 'company_number': '00039177', 'accounts_date': [{'zip_name': 'N/R', 'date': [{'zip_name': 'N/R', 'date': '31/12/2024', 'company_legal_type': 'Private company, limited by guarantee', 'currency': 'GBP', 'total_director_remuneration': 'N/R', 'highest_paid_director': 'N/R', 'inserted_at': '2025-03-11T00:00:00.000Z'}], 'company_legal_type': 'N/R', 'currency': 'N/R', 'total_director_remuneration': 'N/R', 'highest_paid_director': 'N/R', 'inserted_at': '2025-05-18T04:14:42.688Z'}], 'requestId': '93365151-7438-467a-b771-71a275027350'}
+2025-05-18 00:14:42,690 - api_processor - INFO - Successfully fetched info for company 00039177
+[DEBUG] company_info response: {'company_name': 'THE WHITE RIBBON ASSOCIATION INCORPORATED', 'company_number': '00039177', 'accounts_date': [{'zip_name': 'N/R', 'date': '31/12/2024', 'company_legal_type': 'Private company, limited by guarantee', 'currency': 'GBP', 'total_director_remuneration': 'N/R', 'highest_paid_director': 'N/R', 'inserted_at': '2025-03-11T00:00:00.000Z'}]}

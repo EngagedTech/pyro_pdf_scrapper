@@ -7,7 +7,6 @@ from datetime import datetime
 import logging
 from prometheus_client import Counter, Gauge
 import redis
-from celery import Celery
 import zipfile
 from dotenv import load_dotenv
 import json
@@ -17,6 +16,7 @@ from mongo_manager import MongoManager
 import pandas as pd
 from pathlib import Path
 from xbrl_parser import XBRLParser
+from celery_config import celery_app
 
 # Cargar variables de entorno
 load_dotenv()
@@ -32,9 +32,6 @@ ERROR_COUNTER = Counter('download_errors_total', 'Total number of download error
 ACTIVE_DOWNLOADS = Gauge('active_downloads', 'Number of active downloads')
 PARQUET_COUNTER = Counter('parquet_files_total', 'Total number of Parquet files created')
 
-# Configuración de Celery
-celery_app = Celery('xbrl_tasks', broker='redis://localhost:6379/0')
-
 class DownloadService:
     def __init__(self):
         self.download_dir = os.getenv('DOWNLOAD_DIR', 'downloads')
@@ -42,7 +39,13 @@ class DownloadService:
         self.parquet_dir = os.getenv('PARQUET_DIR', 'parquet_files')
         self.max_files_to_download = int(os.getenv('MAX_FILES_TO_DOWNLOAD', '2'))
         self.max_files_to_parse = int(os.getenv('MAX_FILES_TO_PARSE', '100'))
-        self.redis_client = redis.Redis(host='localhost', port=6379, db=0)
+        
+        # Configuración de Redis
+        redis_host = os.getenv('REDIS_HOST', 'localhost')
+        redis_port = int(os.getenv('REDIS_PORT', 6379))
+        redis_db = int(os.getenv('REDIS_DB', 0))
+        self.redis_client = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
+        
         self.session = None
         self.semaphore = asyncio.Semaphore(5)  # Límite de descargas concurrentes
         self.scraper = XBRLScraper()
@@ -168,6 +171,7 @@ class DownloadService:
         try:
             extracted_files = []
             filename = os.path.basename(zip_path)
+            zip_name = os.path.splitext(filename)[0]  # Obtener nombre del ZIP sin extensión
             
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 files_to_extract = [f for f in zip_ref.namelist() if f.endswith(('.html', '.xml', '.xbrl'))]
@@ -189,7 +193,8 @@ class DownloadService:
                         self.mongo_manager.register_file_conversion(
                             filename=file,
                             account_date=account_date,
-                            company_number=company_number
+                            company_number=company_number,
+                            zip_name=zip_name  # Añadir el nombre del ZIP
                         )
                         extracted_files.append(extracted_path)
                         EXTRACT_COUNTER.inc()
@@ -224,7 +229,7 @@ class DownloadService:
             
             if parquet_path and os.path.exists(parquet_path):
                 # Actualizar estado en MongoDB
-                self.mongo_manager.update_conversion_status(filename, "converted")
+                self.mongo_manager.update_conversion_status(filename, "completed")  # Cambiar a "completed"
                 PARQUET_COUNTER.inc()
                 logger.info(f"Successfully converted {filename} to parquet: {parquet_path}")
                 return parquet_path

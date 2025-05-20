@@ -37,9 +37,9 @@ S3_UPLOAD_ENABLED = bool(strtobool(os.getenv("S3_UPLOAD_ENABLED", "false")))
 
 # Web scraper configuration
 BASE_URL = os.getenv("BASE_URL", "https://download.companieshouse.gov.uk/")
-LIST_URL = os.getenv("LIST_URL", "https://download.companieshouse.gov.uk/historicmonthlyaccountsdata.html")
+LIST_URL = os.getenv("LIST_URL", "https://download.companieshouse.gov.uk/en_accountsdata.html")
 # Alias para mantener compatibilidad con el código existente
-SCRAPER_URL = LIST_URL
+SCRAPER_URL = os.getenv("LIST_URL", "https://download.companieshouse.gov.uk/en_accountsdata.html")
 
 # Processing limits
 MAX_FILES_TO_DOWNLOAD = int(os.getenv("MAX_FILES_TO_DOWNLOAD", "3"))

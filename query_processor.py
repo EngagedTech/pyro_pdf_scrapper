@@ -13,6 +13,7 @@ import tiktoken
 from typing import Dict, List, Any, Optional, Union, Tuple
 from dataclasses import dataclass
 from enum import Enum
+from datetime import datetime
 
 import openai
 # Actualizar importación de excepciones para OpenAI API v1.0+
@@ -89,7 +90,7 @@ class EnvConfig(BaseSettings):
     def check_token_limits(cls, values):
         """Ensure batch_size and token limits are compatible."""
         batch_size = values.get('batch_size', 100)
-        max_tokens = values.get('openai_max_tokens_per_batch', 4000)
+        max_tokens = values.get('openai_max_tokens_per_batch', 8000)
         
         # Each record might take ~200 tokens on average (very rough estimate)
         # This ensures we don't exceed token limits by default
@@ -223,60 +224,61 @@ def prepare_batches(
 ) -> List[List[Dict]]:
     """
     Split matches into batches, ensuring each batch's prompt stays within token limits.
-    
-    Args:
-        matches: List of Pinecone match results
-        batch_size: Maximum number of records per batch
-        max_tokens: Maximum tokens allowed per batch
-        model: OpenAI model identifier
-        
-    Returns:
-        List of batches, where each batch is a list of records
+    Reserva un buffer explícito para la respuesta, configurable por variable de entorno.
     """
+    RESPONSE_TOKEN_BUFFER = int(os.environ.get("OPENAI_RESPONSE_TOKEN_BUFFER", 2000))
+    max_tokens_for_batch = max_tokens - RESPONSE_TOKEN_BUFFER
     batches = []
     current_batch = []
     current_token_count = 0
-    
-    # Token count for the prompt template (estimated)
-    prompt_template = """
-    Extract as JSON the following fields from these records:
-    - company_number
-    - company_name
-    - company_legal_type
-    - accounts_date (dd/mm/yyyy)
-    - highest_paid_director.name
-    - highest_paid_director.remuneration
-    - total_director_remuneration
-    - currency
-    Records: []
-    """
+    prompt_template = (
+        "Carefully analyze the following company information and extract the requested data in JSON format.\n"
+        "These are search results from a database containing company financial data.\n"
+        "If any value is not explicitly reported in the records, you must use exactly 'N/R'.\n\n"
+        "Records to analyze:\n[...batch...]\n\n"
+        "Please extract the following data from the document and return the result in this JSON format:\n"
+        "    {\n"
+        "      'company_number': '...',\n"
+        "      'company_name': '...',\n"
+        "      'accounts_date': [\n"
+        "        {\n"
+        "          'zip_name': '...',\n"
+        "          'date': 'dd/mm/yyyy',\n"
+        "          'company_legal_type': '...',\n"
+        "          'currency': '...',\n"
+        "          'total_director_remuneration': '...',\n"
+        "          'highest_paid_director': '...',\n"
+        "          'inserted_at': 'YYYY-MM-DDThh:mm:ss.sssZ'\n"
+        "        }\n"
+        "      ]\n"
+        "    }\n"
+        "1. Company Number (Core Ref)\n"
+        "2. Company Name\n"
+        "3. Company Legal Type\n"
+        "4. Accounts Date (dd/mm/yyyy)\n"
+        "5. Highest Paid Director (amount)\n"
+        "6. Total Director Remuneration\n"
+        "7. Currency (ISO code e.g. GBP, EUR, USD)\n"
+        "Instructions: ...\n"
+        "Expected format: ...\n"
+        "Respond ONLY with the JSON object, no explanation."
+    )
     base_token_count = get_token_count(prompt_template, model)
-    
     for match in matches:
-        # Get metadata from match
         metadata = match.get('metadata', {})
-        
-        # Calculate token count for this record
         record_text = json.dumps(metadata)
         record_token_count = get_token_count(record_text, model)
-        
-        # Check if adding this record would exceed token limit
-        if (current_token_count + record_token_count + base_token_count > max_tokens or 
+        if (current_token_count + record_token_count + base_token_count > max_tokens_for_batch or 
             len(current_batch) >= batch_size) and current_batch:
-            # Current batch is full, start a new one
             batches.append(current_batch)
             current_batch = [metadata]
             current_token_count = record_token_count
         else:
-            # Add to current batch
             current_batch.append(metadata)
             current_token_count += record_token_count
-    
-    # Add the last batch if it's not empty
     if current_batch:
         batches.append(current_batch)
-    
-    logger.info(f"Split {len(matches)} records into {len(batches)} batches")
+    logger.info(f"Split {len(matches)} records into {len(batches)} batches (buffer {RESPONSE_TOKEN_BUFFER} tokens)")
     return batches
 
 
@@ -296,31 +298,45 @@ def query_openai(
     Carefully analyze the following company information and extract the requested data in JSON format.
     These are search results from a database containing company financial data.
     If any value is not explicitly reported in the records, you must use exactly "N/R".
+    IMPORTANT: For zip_name, DO NOT use "N/R". Instead, preserve the original zip_name from the metadata.
     
     Records to analyze:
     {json.dumps(batch)}
     
-    Please return the data in the specified JSON format. If any value is not explicitly reported, return "N/R".
-    
+    Please extract the following data from the document and return the result in this JSON format:
+        {
+          "company_number": "...",
+          "company_name": "...",
+          "accounts_date": [
+            {
+              "zip_name": "...",  # Use the original zip_name from metadata, DO NOT use N/R
+              "date": "dd/mm/yyyy",
+              "company_legal_type": "...",
+              "currency": "...",
+              "total_director_remuneration": "...",
+              "highest_paid_director": "...",
+              "inserted_at": "YYYY-MM-DDThh:mm:ss.sssZ"
+            }
+          ]
+        }
     1. Company Number (Core Ref)
     2. Company Name
     3. Company Legal Type
     4. Accounts Date (dd/mm/yyyy)
-    5. Highest Paid Director (name and remuneration)
+    5. Highest Paid Director (amount)
     6. Total Director Remuneration
     7. Currency (ISO code e.g. GBP, EUR, USD)
+    8. ZIP Name (preserve original from metadata)
     
     Instructions:
+    - VERY IMPORTANT: For zip_name, use the original value from the metadata. DO NOT use N/R.
     - If the records contain values in a column format by year, use the most recent year available.
     - For "Total Director Remuneration":
       - Look for values near or below labels like "Remuneration paid to directors"
       - If more than one year is shown, use the most recent year's figure
     - For "Highest Paid Director":
-      - VERY IMPORTANT: Search for any text containing "Remuneration" related to the highest paid director
-      - Use values under sections such as "Remuneration disclosed above include the following amounts paid to the highest paid director"
-      - If there is a line like "Remuneration for qualifying services" within a section mentioning the highest paid director, use that number
-      - If no name is mentioned, return "N/R" for name
-      - Make sure to thoroughly scan all records for any mention of highest paid director remuneration
+      - Look for values under sections like "Highest paid director" or "Remuneration of highest paid director"
+      - If there is a line mentioning "Remuneration" or "Qualifying services" for the highest paid director, use that amount
     - For "Currency":
       - Look for currency symbols (£, €, $, etc.) or explicit currency mentions and return the corresponding ISO code:
         * £ -> "GBP"
@@ -330,27 +346,29 @@ def query_openai(
       - If still unclear, return "N/R"
     
     Expected format:
-    {{
-      "company_number": "...",
-      "company_name": "...",
-      "company_legal_type": "...",
-      "accounts_date": "dd/mm/yyyy",
-      "highest_paid_director": {{
-        "name": "...",
-        "remuneration": "..."
-      }},
-      "total_director_remuneration": "...",
-      "currency": "..."
-    }}
+    {
+          "company_number": "...",
+          "company_name": "...",
+          "accounts_date": [
+            {
+              "zip_name": "...",  # Original zip_name from metadata
+              "date": "dd/mm/yyyy",
+              "company_legal_type": "...",
+              "currency": "...",
+              "total_director_remuneration": "...",
+              "highest_paid_director": "...",
+              "inserted_at": "YYYY-MM-DDThh:mm:ss.sssZ"
+            }
+          ]
+        }
     
-    Respond ONLY with the JSON object, no explanation.
-    """
+    Respond ONLY with the JSON object, no explanation."""
     
     # Prepare common request arguments
     common_args = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "Extract company info from the provided records."},
+            {"role": "system", "content": "Eres un asistente especializado en extraer información financiera y corporativa de documentos contables de empresas. Debes extraer con precisión la información solicitada y formatearla en un objeto JSON."},
             {"role": "user", "content": prompt}
         ],
         "max_tokens": max_tokens,
@@ -417,7 +435,7 @@ def process_batches(batches: List[List[Dict]], config: EnvConfig) -> Dict:
     results = {}
     
     for i, batch in enumerate(batches):
-        logger.info(f"Processing batch {i+1}/{len(batches)} with {len(batch)} records")
+        logger.info("Processing batch %d/%d with %d records", i+1, len(batches), len(batch))
         
         try:
             batch_results = query_openai(
@@ -431,14 +449,16 @@ def process_batches(batches: List[List[Dict]], config: EnvConfig) -> Dict:
             # Merge batch results into final results
             for key, value in batch_results.items():
                 if key == "highest_paid_director" and isinstance(value, dict):
-                    # Handle nested dictionary for director
                     results.setdefault(key, {}).update(value)
                 else:
-                    # For simple fields, use the latest value
                     results[key] = value
             
         except Exception as e:
-            logger.error(f"Error processing batch {i+1}: {str(e)}")
+            try:
+                batch_str = json.dumps(batch, default=str)[:500]
+            except Exception:
+                batch_str = str(batch)[:500]
+            logger.error("Error processing batch %d: %s. Batch content: %s", i+1, str(e), batch_str)
             # Continue with next batch
     
     return results
@@ -478,72 +498,91 @@ def embed_text(query: str) -> List[float]:
 def query_pinecone_and_summarize(query: str) -> Dict:
     """
     Query Pinecone with a text query, extract information via OpenAI.
-    
-    This function:
-    1. Loads configuration from environment variables
-    2. Converts the text query to an embedding vector
-    3. Searches Pinecone for similar vectors
-    4. Batches results within token limits
-    5. Uses OpenAI to extract structured information
-    6. Returns a structured dict with company information
-    
-    Args:
-        query: Text query string
-        
-    Returns:
-        Dict: Structured company information
+    Devuelve SIEMPRE la estructura normalizada para MongoDB.
     """
-    # Load and validate configuration
     try:
         config = EnvConfig()
     except Exception as e:
         logger.error(f"Environment configuration error: {str(e)}")
         raise
-    
-    # Configure OpenAI
     openai.api_key = config.openai_api_key
-    
     try:
-        # Generate embedding for query
         query_vector = embed_text(query)
-        
-        # Query Pinecone
         results = query_pinecone(query_vector, config)
         logger.info(f"Pinecone query results: {results}")
         matches = results.get("matches", [])
-        
         if not matches:
             logger.warning("No matches found in Pinecone")
             return {}
-        
-        # Prepare batches within token limits
         batches = prepare_batches(
             matches=matches,
             batch_size=config.batch_size,
             max_tokens=config.openai_max_tokens_per_batch,
             model=config.openai_model
         )
-        
-        # Process batches and aggregate results
         final_results = process_batches(batches, config)
-        
-        # Ensure the output has the expected structure
-        expected_keys = [
-            "company_number", "company_name", "company_legal_type", 
-            "accounts_date", "highest_paid_director", 
-            "total_director_remuneration", "currency"
-        ]
-        
-        for key in expected_keys:
-            if key not in final_results:
-                if key == "highest_paid_director":
-                    final_results[key] = {"name": "", "remuneration": ""}
-                else:
-                    final_results[key] = ""
-        
-        return final_results
-        
+        # --- Normalización estricta ---
+        company_number = str(final_results.get("company_number", ""))
+        company_name = str(final_results.get("company_name", ""))
+        accounts = final_results.get("accounts_date", [])
+        if not isinstance(accounts, list):
+            accounts = [accounts]
+        normalized_accounts = []
+        for acc in accounts:
+            acc = acc or {}
+            normalized_accounts.append({
+                "zip_name": str(acc.get("zip_name", "")),
+                "date": str(acc.get("date", "")),
+                "company_legal_type": str(acc.get("company_legal_type", "")),
+                "currency": str(acc.get("currency", "")),
+                "total_director_remuneration": str(acc.get("total_director_remuneration", "")),
+                "highest_paid_director": str(acc.get("highest_paid_director", "")),
+                "inserted_at": datetime.utcnow().isoformat() + "Z"
+            })
+        return {
+            "company_number": company_number,
+            "company_name": company_name,
+            "accounts_date": normalized_accounts
+        }
     except Exception as e:
         logger.error(f"Error in query_pinecone_and_summarize: {str(e)}")
-        # Return empty dict on failure
-        return {} 
+        return {}
+
+
+def process_pinecone_matches_and_summarize(matches: List[Dict], config: 'EnvConfig') -> Dict:
+    """
+    Procesa directamente los matches de Pinecone, divide en batches, extrae info con OpenAI y normaliza la salida.
+    """
+    if not matches:
+        logger.warning("No matches provided to process_pinecone_matches_and_summarize")
+        return {}
+    batches = prepare_batches(
+        matches=matches,
+        batch_size=config.batch_size,
+        max_tokens=config.openai_max_tokens_per_batch,
+        model=config.openai_model
+    )
+    final_results = process_batches(batches, config)
+    # --- Normalización estricta ---
+    company_number = str(final_results.get("company_number", ""))
+    company_name = str(final_results.get("company_name", ""))
+    accounts = final_results.get("accounts_date", [])
+    if not isinstance(accounts, list):
+        accounts = [accounts]
+    normalized_accounts = []
+    for acc in accounts:
+        acc = acc or {}
+        normalized_accounts.append({
+            "zip_name": str(acc.get("zip_name", "")),
+            "date": str(acc.get("date", "")),
+            "company_legal_type": str(acc.get("company_legal_type", "")),
+            "currency": str(acc.get("currency", "")),
+            "total_director_remuneration": str(acc.get("total_director_remuneration", "")),
+            "highest_paid_director": str(acc.get("highest_paid_director", "")),
+            "inserted_at": datetime.utcnow().isoformat() + "Z"
+        })
+    return {
+        "company_number": company_number,
+        "company_name": company_name,
+        "accounts_date": normalized_accounts
+    } 

@@ -9,26 +9,35 @@ import logging
 from urllib.parse import urljoin
 import re
 from typing import Dict, Any
+from dotenv import load_dotenv
+
+# Cargar variables de entorno
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class XBRLScraper:
     def __init__(self, 
-                 base_url="https://download.companieshouse.gov.uk/", 
-                 list_url="https://download.companieshouse.gov.uk/historicmonthlyaccountsdata.html", 
+                 base_url=None, 
+                 list_url=None, 
                  download_dir="downloads"):
         """
         Initialize the scraper
         
         Args:
-            base_url (str): Base URL of the Companies House download site
-            list_url (str): URL containing the list of historical data files
+            base_url (str): Base URL of the API endpoint
+            list_url (str): URL containing the list of files
             download_dir (str): Directory to save downloaded files
         """
-        self.base_url = base_url
-        self.list_url = list_url
+        # Usar valores del .env por defecto
+        self.base_url = base_url or os.getenv('BASE_URL', 'https://download.companieshouse.gov.uk/')
+        self.list_url = list_url or os.getenv('LIST_URL', 'https://download.companieshouse.gov.uk/en_accountsdata.html')
         self.download_dir = download_dir
+        
+        # Log de configuración
+        logger.info(f"XBRLScraper initialized with BASE_URL: {self.base_url}")
+        logger.info(f"XBRLScraper initialized with LIST_URL: {self.list_url}")
         
         # Create download directory if it doesn't exist
         if not os.path.exists(download_dir):

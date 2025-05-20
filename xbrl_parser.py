@@ -379,7 +379,8 @@ class XBRLParser:
                 mongo_manager.register_file_conversion(
                     filename=document_data['doc_file_name'],
                     account_date=filename_data.get('account_date', ''),
-                    company_number=filename_data.get('company_number', '')
+                    company_number=filename_data.get('company_number', ''),
+                    zip_name=zip_folder
                 )
             
             # Approach 1: Parse with BeautifulSoup to extract text and metadata
