@@ -7,6 +7,7 @@ import argparse
 import os
 import sys
 import subprocess
+from datetime import datetime
 
 # Intenta importar dependencias mínimas
 try:
@@ -450,7 +451,33 @@ def main():
                         logger.info(f"Processing file {i+1}/{len(extracted_files)}")
                         
                     if file_path.lower().endswith(('.html', '.xml')):
-                        parquet_file = parser.xbrl_to_parquet(file_path, mongo_manager=mongo_manager)
+                        # Crear un registro de conversión en MongoDB
+                        conversion_id = None
+                        if mongo_manager:
+                            try:
+                                # Extraer company number del nombre del archivo
+                                file_name = os.path.basename(file_path)
+                                company_number = os.path.splitext(file_name)[0]
+                                
+                                # Obtener el último zip_download_id
+                                last_zip = mongo_manager.zip_download_collection.find_one(
+                                    sort=[('createdAt', -1)]
+                                )
+                                
+                                if last_zip:
+                                    conversion_id = mongo_manager.create_conversion(
+                                        zip_download_id=last_zip['_id'],
+                                        file_name=file_name,
+                                        file_date=datetime.now(),
+                                        company_number=company_number,
+                                        s3_bucket=os.getenv('S3_BUCKET', 'default-bucket')
+                                    )
+                                else:
+                                    logger.warning("No ZIP download record found, skipping MongoDB tracking")
+                            except Exception as e:
+                                logger.error(f"Error creating conversion record: {e}")
+                        
+                        parquet_file = parser.xbrl_to_parquet(file_path, conversion_id, mongo_manager)
                         if parquet_file:
                             parquet_files.append(parquet_file)
                 

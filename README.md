@@ -1,146 +1,148 @@
-# XBRL a Pinecone Pipeline
+# XBRL to Pinecone Pipeline
 
-Este proyecto automatiza el proceso de extraer datos XBRL del Registro Mercantil, procesarlos e importarlos a una base de datos vectorial Pinecone.
+This project automates the process of extracting XBRL data from the Commercial Registry, processing it, and importing it into a Pinecone vector database.
 
-## Características
+## Features
 
-- Rastrea [Companies House historic monthly accounts data](https://download.companieshouse.gov.uk/historicmonthlyaccountsdata.html) en busca de archivos ZIP que contengan XBRL
-- Extrae archivos XBRL de archivos ZIP
-- Analiza formatos XBRL (.html) y XBRL (.xml) en línea.
-- Convierte los datos XBRL a formato Parquet para Pinecone.
-- Sube archivos Parquet a S3 (opcional).
-- Importa los datos a Pinecone usando la API de importación masiva.
+- Crawls [Companies House historic monthly accounts data](https://download.companieshouse.gov.uk/historicmonthlyaccountsdata.html) for ZIP files containing XBRL
+- Extracts XBRL files from ZIP archives
+- Parses XBRL formats (.html) and XBRL (.xml) inline
+- Converts XBRL data to Parquet format for Pinecone
+- Uploads Parquet files to S3 (optional)
+- Imports data into Pinecone using the bulk import API
 
-## Requisitos
+## Requirements
 
 - Python 3.7+
-- Cuenta Pinecone con plan Standard
-- Bucket S3 para almacenar archivos Parquet (opcional si se utilizan archivos locales)
+- Pinecone account with Standard plan
+- S3 bucket to store Parquet files (optional if using local files)
 
-## Instalación
+## Installation
 
 ```bash
-# Clonar el repositorio
+# Clone the repository
 git clone https://github.com/yourusername/xbrl-to-pinecone.git
 cd xbrl-to-pinecone
 
-# Instalar dependencias
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-## Configuración
+## Configuration
 
-Cree un archivo `.env` en el directorio raíz con lo siguiente:
+Create a `.env` file in the root directory with the following:
 
 ```
-# Configuración de Pinecone
-PINECONE_API_KEY=tu_clave_api_pinecone
-INDEX_HOST=tu_index_host
-S3_URI=s3://tu_bucket/ruta/
-INTEGRATION_ID=tu_id_integración
+# Pinecone configuration
+PINECONE_API_KEY=your_pinecone_api_key
+INDEX_HOST=your_index_host
+S3_URI=s3://your_bucket/path/
+INTEGRATION_ID=your_integration_id
 
-# Configuración de S3 (opcional - solo si deseas subir archivos a S3)
-AWS_ACCESS_KEY_ID=tu_access_key_id
-AWS_SECRET_ACCESS_KEY=tu_secret_access_key
-AWS_REGION=tu_region
-S3_ENDPOINT_URL=https://s3.amazonaws.com  # Opcional: para S3-compatible endpoints
+# S3 configuration (optional - only if you want to upload files to S3)
+AWS_ACCESS_KEY_ID=your_access_key_id
+AWS_SECRET_ACCESS_KEY=your_secret_access_key
+AWS_REGION=your_region
+S3_ENDPOINT_URL=https://s3.amazonaws.com  # Optional: for S3-compatible endpoints
 S3_UPLOAD_ENABLED=true
 
-# Configuración de Scraper
+# Scraper configuration
 SCRAPER_URL=https://download.companieshouse.gov.uk/historicmonthlyaccountsdata.html
 BASE_URL=https://download.companieshouse.gov.uk/
-MAX_FILES_TO_DOWNLOAD=3  # Limitar a 3 archivos ZIP para evitar descargar grandes cantidades de datos
-MAX_FILES_TO_PARSE=100  # Límite de 100 archivos XBRL por ZIP
-FILTER_YEAR=  # Dejar vacío para todos los años, o especificar un año (p.ej. "2023")
+MAX_FILES_TO_DOWNLOAD=3  # Limit to 3 ZIP files to avoid downloading large amounts of data
+MAX_FILES_TO_PARSE=100  # Limit of 100 XBRL files per ZIP
+FILTER_YEAR=  # Leave empty for all years, or specify a year (e.g., "2023")
 
-# Rutas de archivos
+# File paths
 DOWNLOAD_DIR=downloads
 EXTRACT_DIR=extracted
 PARQUET_DIR=parquet_files
 
 # Vector dimensions
-VECTOR_DIMENSIONS=1536  # Dimensión para OpenAI embeddings
+VECTOR_DIMENSIONS=1536  # Dimension for OpenAI embeddings
 
-# Variables para query_processor.py
+# Variables for query_processor.py
 PINECONE_FIELDS=company_number,company_name,company_legal_type,accounts_date,highest_paid_director.name,highest_paid_director.remuneration,total_director_remuneration,currency
 BATCH_SIZE=50
 OPENAI_MAX_TOKENS_PER_BATCH=4000
 OPENAI_REQUEST_TIMEOUT=60
 ```
 
-## Uso
+## Usage
 
-Ejecutar el script principal:
+Run the main script:
 
 ```bash
 python main.py
 ```
 
-Opciones disponibles:
+Available options:
 
 ```
 python main.py --help
 ```
 
-Ejemplos comunes:
+Common examples:
 
 ```bash
-# Solo descargar y procesar XBRL sin importar a Pinecone
+# Run the full pipeline
+python3 main.py 
+# Only download and process XBRL without importing to Pinecone
 python main.py --scrape-only
 
-# Solo importar a Pinecone (usar archivos Parquet existentes)
+# Only import to Pinecone (use existing Parquet files)
 python main.py --import-only
 
-# Filtrar por año
+# Filter by year
 python main.py --year 2023
 
-# Limitar cantidad de archivos
+# Limit number of files
 python main.py --max-zips 5 --max-files 100
 
-# Habilitar subida a S3 
+# Enable S3 upload
 python main.py --upload-s3
 
-# Sin límite de archivos a procesar
+# No limit on files to process
 python main.py --no-limit
 ```
 
-## Estructura de directorios
+## Directory Structure
 
-- `/downloads`: Contiene los archivos ZIP descargados
-- `/extracted`: Contiene los archivos XBRL extraídos
-- `/parquet_files`: Contiene los archivos Parquet generados
-- `/logs`: Contiene logs del proceso (creado automáticamente)
+- `/downloads`: Contains downloaded ZIP files
+- `/extracted`: Contains extracted XBRL files
+- `/parquet_files`: Contains generated Parquet files
+- `/logs`: Contains process logs (created automatically)
 
-## Flujo de procesamiento
+## Processing Flow
 
-1. Verifica los requisitos (dependencias, variables de entorno)
-2. Descarga archivos ZIP con datos XBRL
-3. Extrae archivos XBRL de los ZIP
-4. Convierte archivos XBRL a formato Parquet
-5. (Opcional) Sube archivos Parquet a S3
-6. Importa datos a Pinecone usando la API de importación masiva
+1. Checks requirements (dependencies, environment variables)
+2. Downloads ZIP files with XBRL data
+3. Extracts XBRL files from ZIPs
+4. Converts XBRL files to Parquet format
+5. (Optional) Uploads Parquet files to S3
+6. Imports data to Pinecone using the bulk import API
 
-## Nuevo flujo con Pinecone y OpenAI
+## New Flow with Pinecone and OpenAI
 
-El proyecto ahora incluye un nuevo módulo `query_processor.py` que permite consultar documentos en Pinecone y extraer información estructurada mediante OpenAI.
+The project now includes a new module `query_processor.py` that allows querying documents in Pinecone and extracting structured information using OpenAI.
 
-### Cómo utilizar el nuevo flujo
+### How to use the new flow
 
-El procesador API (`api_processor.py`) ahora utiliza internamente esta funcionalidad para consultar información de empresas, reemplazando las consultas a APIs externas:
+The API processor (`api_processor.py`) now internally uses this functionality to query company information in Pinecone, replacing queries to external APIs:
 
 ```python
 from query_processor import query_pinecone_and_summarize
 
-# Generar una consulta
+# Generate a query
 query = f"company number {company_number} account date {account_date}"
 
-# Ejecutar la consulta y obtener la información estructurada
+# Execute the query and get structured information
 company_info = query_pinecone_and_summarize(query)
 ```
 
-Este flujo optimizado para producción incluye:
-- Reintento automático con backoff exponencial
-- Control preciso de tokens con tiktoken
-- Procesamiento por lotes
-- Validación de configuración con Pydantic
-- Registro detallado de errores y eventos
+This production-optimized flow includes:
+- Automatic retry with exponential backoff
+- Precise token control with tiktoken
+- Batch processing
+- Configuration validation with Pydantic
+- Detailed error and event logging

@@ -9,13 +9,26 @@ from pymongo import MongoClient
 from pymongo.errors import PyMongoError, DuplicateKeyError
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Union
+from bson import ObjectId
 from dotenv import load_dotenv
 
-# Cargar variables de entorno del archivo .env
+# Load environment variables
 load_dotenv()
 
-# Setup logging
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('mongo.log'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
+
+class ValidationError(Exception):
+    """Custom exception for data validation errors"""
+    pass
 
 class MongoManager:
     """
@@ -38,7 +51,7 @@ class MongoManager:
         # Collections
         self.results_collection = None
         self.conversions_collection = None
-        self.downloads_collection = None
+        self.zip_download_collection = None
         
         # Connect to database
         self._connect()
@@ -78,9 +91,9 @@ class MongoManager:
             self.db = self.client[self.db_name]
             
             # Initialize collections
-            self.results_collection = self.db["results"]
+            self.results_collection = self.db["result"]
             self.conversions_collection = self.db["conversions"]
-            self.downloads_collection = self.db["downloads"]
+            self.zip_download_collection = self.db["zip_download"]
             
             # Create indexes for efficient querying
             self._create_indexes()
@@ -96,21 +109,131 @@ class MongoManager:
         Create indexes for collections
         """
         try:
-            # results collection
-            self.results_collection.create_index([("company_number", pymongo.ASCENDING)], unique=True)
+            # result collection
+            self.results_collection.create_index(
+                [("company_number", pymongo.ASCENDING)],
+                unique=True
+            )
             
-            # conversions collection
-            self.conversions_collection.create_index([("filename", pymongo.ASCENDING)], unique=True)
-            self.conversions_collection.create_index([("status", pymongo.ASCENDING)])
+            # conversions collection - Composite index
+            self.conversions_collection.create_index([
+                ("zipDownloadId", pymongo.ASCENDING),
+                ("file_name", pymongo.ASCENDING)
+            ], unique=True)
             
-            # downloads collection
-            self.downloads_collection.create_index([("filename", pymongo.ASCENDING)], unique=True)
-            self.downloads_collection.create_index([("status", pymongo.ASCENDING)])
+            # Additional indexes for conversions
+            self.conversions_collection.create_index([("company_number", pymongo.ASCENDING)])
+            self.conversions_collection.create_index([("converted", pymongo.ASCENDING)])
+            self.conversions_collection.create_index([("uploaded", pymongo.ASCENDING)])
+            self.conversions_collection.create_index([("pineconeImported", pymongo.ASCENDING)])
+            
+            # zip_download collection - Composite index
+            self.zip_download_collection.create_index([
+                ("file_name", pymongo.ASCENDING),
+                ("file_date", pymongo.ASCENDING)
+            ], unique=True)
+            
+            # Additional indexes for zip_download
+            self.zip_download_collection.create_index([("namespace", pymongo.ASCENDING)])
+            self.zip_download_collection.create_index([("downloaded", pymongo.ASCENDING)])
+            self.zip_download_collection.create_index([("unzipped", pymongo.ASCENDING)])
             
             logger.info("MongoDB indexes created successfully")
             
         except PyMongoError as e:
             logger.error(f"Failed to create indexes: {e}")
+            raise
+    
+    def validate_zip_data(self, url: str, file_name: str, file_date: str) -> bool:
+        """
+        Validate ZIP download data
+        
+        Args:
+            url (str): ZIP file URL
+            file_name (str): ZIP file name
+            file_date (str): Date identifier (YYYY-MM)
+            
+        Returns:
+            bool: True if valid
+            
+        Raises:
+            ValidationError: If validation fails
+        """
+        if not url or not url.startswith(('http://', 'https://')):
+            raise ValidationError("Invalid URL format")
+            
+        if not file_name or not file_name.endswith('.zip'):
+            raise ValidationError("Invalid file name format")
+            
+        # Validate file_date format (YYYY-MM)
+        import re
+        if not re.match(r'^\d{4}-\d{2}$', file_date):
+            raise ValidationError("Invalid file date format (should be YYYY-MM)")
+            
+        return True
+    
+    def validate_conversion_data(self, data: Dict[str, Any]) -> bool:
+        """
+        Validate conversion data
+        
+        Args:
+            data (dict): Conversion data to validate
+            
+        Returns:
+            bool: True if valid
+            
+        Raises:
+            ValidationError: If validation fails
+        """
+        required_fields = {
+            "zipDownloadId": ObjectId,
+            "file_name": str,
+            "company_number": str,
+            "s3Bucket": str
+        }
+        
+        for field, field_type in required_fields.items():
+            if field not in data:
+                raise ValidationError(f"Missing required field: {field}")
+            if not isinstance(data[field], field_type):
+                raise ValidationError(f"Invalid type for {field}")
+                
+        return True
+    
+    def validate_company_data(self, data: Dict[str, Any]) -> bool:
+        """
+        Validate company data
+        
+        Args:
+            data (dict): Company data to validate
+            
+        Returns:
+            bool: True if valid
+            
+        Raises:
+            ValidationError: If validation fails
+        """
+        required_fields = [
+            "company_number",
+            "company_name",
+            "company_legal_type",
+            "total_director_remuneration",
+            "highest_paid_director"
+        ]
+        
+        for field in required_fields:
+            if field not in data:
+                raise ValidationError(f"Missing required field: {field}")
+            
+        if not isinstance(data["highest_paid_director"], dict):
+            raise ValidationError("highest_paid_director must be a dictionary")
+            
+        hpd_fields = ["name", "remuneration"]
+        for field in hpd_fields:
+            if field not in data["highest_paid_director"]:
+                raise ValidationError(f"Missing field in highest_paid_director: {field}")
+                
+        return True
     
     def close(self):
         """
@@ -120,97 +243,327 @@ class MongoManager:
             self.client.close()
             logger.info("MongoDB connection closed")
     
-    # Methods for results collection
-    def insert_result(self, result_data: Dict[str, Any]) -> bool:
+    # Methods for zip_download collection
+    def create_zip_download(self, url: str, file_name: str, file_date: str) -> Optional[ObjectId]:
         """
-        Insert company financial data into results collection
+        Create a new ZIP download record
         
         Args:
-            result_data (dict): Financial data from XBRL documents
-                Required fields:
-                - company_number
-                - company_name
-                Optional fields:
-                - company_legal_type
-                - accounts_date
-                - highest_paid_director (dict with name and remuneration)
-                - total_director_remuneration
-                - currency
-                - zip_name
+            url (str): URL of the ZIP file
+            file_name (str): Name of the ZIP file
+            file_date (str): Date identifier for the batch (YYYY-MM)
         
         Returns:
-            bool: True if successful, False otherwise
+            ObjectId|None: ID of created document or None if failed
         """
-        company_number = result_data.get("company_number")
-        company_name = result_data.get("company_name", "")
-        
-        # Asegurar que accounts_date sea una lista
-        accounts_date = result_data.get("accounts_date", [])
-        if not isinstance(accounts_date, list):
-            accounts_date = [accounts_date] if accounts_date else []
-        
-        # Procesar cada entrada de accounts_date
-        processed_accounts = []
-        for acc in accounts_date:
-            if not isinstance(acc, dict):
-                continue
+        try:
+            # Validate input data
+            self.validate_zip_data(url, file_name, file_date)
+            
+            doc = {
+                "url": url,
+                "file_name": file_name,
+                "file_date": file_date,
+                "namespace": file_name,
+                "downloaded": False,
+                "unzipped": False,
+                "createdAt": datetime.now(),
+                "updatedAt": datetime.now()
+            }
+            
+            # Try to insert, handle duplicate case
+            try:
+                result = self.zip_download_collection.insert_one(doc)
+                logger.info(f"Created ZIP download record: {file_name}")
+                return result.inserted_id
+            except DuplicateKeyError:
+                # If duplicate, return existing record ID
+                existing = self.zip_download_collection.find_one({
+                    "file_name": file_name,
+                    "file_date": file_date
+                })
+            if existing:
+                    logger.info(f"Found existing ZIP download record: {file_name}")
+                    return existing["_id"]
+            return None
                 
-            entry = {
-                "zip_name": acc.get("zip_name", ""),  # Mantener zip_name de la entrada
-                "date": acc.get("date", ""),
-                "company_legal_type": acc.get("company_legal_type", ""),
-                "currency": acc.get("currency", "GBP"),
-                "total_director_remuneration": acc.get("total_director_remuneration", ""),
-                "highest_paid_director": acc.get("highest_paid_director", ""),
+        except ValidationError as e:
+            logger.error(f"Validation error creating ZIP download record: {e}")
+            return None
+        except PyMongoError as e:
+            logger.error(f"Failed to create ZIP download record: {e}")
+            return None
+    
+    def update_zip_download_status(self, _id: ObjectId, downloaded: bool = None, unzipped: bool = None) -> bool:
+        """
+        Update ZIP download status
+        
+        Args:
+            _id (ObjectId): Document ID
+            downloaded (bool): Set downloaded status and timestamp
+            unzipped (bool): Set unzipped status and timestamp
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            update = {"updatedAt": datetime.now()}
+            
+            if downloaded is not None:
+                update["downloaded"] = downloaded
+                if downloaded:
+                    update["downloadedAt"] = datetime.now()
+                    
+            if unzipped is not None:
+                update["unzipped"] = unzipped
+                if unzipped:
+                    update["unzippedAt"] = datetime.now()
+            
+            result = self.zip_download_collection.update_one(
+                {"_id": _id},
+                {"$set": update}
+            )
+            
+            success = result.modified_count > 0
+            if success:
+                logger.info(f"Updated ZIP download status for {_id}")
+            else:
+                logger.warning(f"No ZIP download record found for {_id}")
+            
+            return success
+            
+        except PyMongoError as e:
+            logger.error(f"Failed to update ZIP download status: {e}")
+            return False
+    
+    # Methods for conversions collection
+    def create_conversion(self, zip_download_id: ObjectId, file_name: str, file_date: datetime, 
+                         company_number: str, s3_bucket: str) -> Optional[ObjectId]:
+        """
+        Create a new conversion record
+        
+        Args:
+            zip_download_id (ObjectId): Reference to zip_download document
+            file_name (str): Name of the HTML/XML file
+            file_date (datetime): Date of the file
+            company_number (str): Company identifier
+            s3_bucket (str): S3 bucket name for Parquet files
+            
+        Returns:
+            ObjectId|None: ID of created document or None if failed
+        """
+        try:
+            # Validate input data
+            data = {
+                "zipDownloadId": zip_download_id,
+                "file_name": file_name,
+                "company_number": company_number,
+                "s3Bucket": s3_bucket
+            }
+            self.validate_conversion_data(data)
+            
+            doc = {
+                **data,
+                "file_date": file_date,
+                "retrieved": False,
+                "converted": False,
+                "uploaded": False,
+                "pineconeImported": False,
+                "s3Folder": "",  # Will be set after getting zip_download info
+                "recordCount": 0,
+                "createdAt": datetime.now(),
+                "updatedAt": datetime.now()
+            }
+            
+            # Get zip_download info to set s3Folder
+            zip_info = self.zip_download_collection.find_one({"_id": zip_download_id})
+            if zip_info:
+                doc["s3Folder"] = zip_info["file_name"]
+            else:
+                raise ValidationError(f"No ZIP record found for ID: {zip_download_id}")
+            
+            # Try to insert, handle duplicate case
+            try:
+                result = self.conversions_collection.insert_one(doc)
+                logger.info(f"Created conversion record for file: {file_name}")
+                return result.inserted_id
+            except DuplicateKeyError:
+                # If duplicate, return existing record ID
+                existing = self.conversions_collection.find_one({
+                    "zipDownloadId": zip_download_id,
+                    "file_name": file_name
+                })
+                if existing:
+                    logger.info(f"Found existing conversion record: {file_name}")
+                    return existing["_id"]
+                return None
+                
+        except ValidationError as e:
+            logger.error(f"Validation error creating conversion record: {e}")
+            return None
+        except PyMongoError as e:
+            logger.error(f"Failed to create conversion record: {e}")
+            return None
+    
+    def update_conversion_status(self, _id: ObjectId, **kwargs) -> bool:
+        """
+        Update conversion status fields
+        
+        Args:
+            _id (ObjectId): Document ID
+            **kwargs: Status fields to update (retrieved, converted, uploaded, pineconeImported)
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            valid_fields = {
+                "retrieved": "retrievedAt",
+                "converted": "convertedAt",
+                "uploaded": "uploadedAt",
+                "pineconeImported": "importedAt"
+            }
+            
+            update = {"updatedAt": datetime.now()}
+            
+            for field, value in kwargs.items():
+                if field in valid_fields and isinstance(value, bool):
+                    update[field] = value
+                    if value and valid_fields[field]:
+                        update[valid_fields[field]] = datetime.now()
+            
+            if "recordCount" in kwargs:
+                if not isinstance(kwargs["recordCount"], int) or kwargs["recordCount"] < 0:
+                    raise ValidationError("recordCount must be a non-negative integer")
+                update["recordCount"] = kwargs["recordCount"]
+            
+            result = self.conversions_collection.update_one(
+                {"_id": _id if isinstance(_id, ObjectId) else ObjectId(_id)},
+                {"$set": update}
+            )
+            
+            success = result.modified_count > 0
+            if success:
+                logger.info(f"Updated conversion status for {_id}")
+            else:
+                logger.warning(f"No conversion record found for {_id}")
+            
+            return success
+            
+        except ValidationError as e:
+            logger.error(f"Validation error updating conversion status: {e}")
+            return False
+        except PyMongoError as e:
+            logger.error(f"Failed to update conversion status: {e}")
+            return False
+    
+    # Methods for result collection
+    def upsert_company_result(self, company_number: str, company_name: str, new_entry: Dict[str, Any]) -> bool:
+        """
+        Upsert company result with new accounts data
+        
+        Args:
+            company_number (str): Company identifier
+            company_name (str): Company name
+            new_entry (dict): New accounts data entry
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            # Validate company data
+            self.validate_company_data(new_entry)
+            
+            # Prepare the accounts entry
+            accounts_entry = {
+                "zip_name": new_entry.get("zip_name", ""),
+                "date": new_entry.get("date", ""),
+                "company_legal_type": new_entry.get("company_legal_type", ""),
+                "currency": new_entry.get("currency", "GBP"),
+                "total_director_remuneration": new_entry.get("total_director_remuneration", ""),
+                "highest_paid_director": new_entry.get("highest_paid_director", {}),
                 "inserted_at": datetime.now()
             }
-            processed_accounts.append(entry)
-
-        try:
-            existing = self.results_collection.find_one({"company_number": company_number})
+            
+            # First, check if entry with same zip_name and date exists
+            existing = self.results_collection.find_one({
+                "company_number": company_number,
+                "accounts_date": {
+                    "$elemMatch": {
+                        "zip_name": accounts_entry["zip_name"],
+                        "date": accounts_entry["date"]
+                    }
+                }
+            })
+            
             if existing:
-                # Actualizar entradas existentes o añadir nuevas
-                existing_accounts = existing.get("accounts_date", [])
-                for new_acc in processed_accounts:
-                    # Buscar entrada existente con mismo zip_name y date
-                    found = False
-                    for existing_acc in existing_accounts:
-                        if (existing_acc.get("zip_name") == new_acc["zip_name"] and 
-                            existing_acc.get("date") == new_acc["date"]):
-                            existing_acc.update(new_acc)
-                            found = True
-                            break
-                    if not found:
-                        existing_accounts.append(new_acc)
-                
-                # Actualizar documento
-                self.results_collection.update_one(
-                    {"company_number": company_number},
+                # Update existing entry
+                result = self.results_collection.update_one(
+                    {
+                        "company_number": company_number,
+                        "accounts_date": {
+                            "$elemMatch": {
+                                "zip_name": accounts_entry["zip_name"],
+                                "date": accounts_entry["date"]
+                            }
+                        }
+                    },
                     {
                         "$set": {
                             "company_name": company_name,
-                            "accounts_date": existing_accounts,
-                            "updated_at": datetime.now()
+                            "updatedAt": datetime.now(),
+                            "accounts_date.$": accounts_entry
                         }
                     }
                 )
             else:
-                # Crear nuevo documento
-                doc = {
-                    "company_number": company_number,
-                    "company_name": company_name,
-                    "accounts_date": processed_accounts,
-                    "created_at": datetime.now(),
-                    "updated_at": datetime.now()
-                }
-                self.results_collection.insert_one(doc)
+                # Add new entry
+                result = self.results_collection.update_one(
+                    {"company_number": company_number},
+                {
+                        "$setOnInsert": {
+                            "company_name": company_name,
+                            "createdAt": datetime.now()
+                        },
+                        "$set": {"updatedAt": datetime.now()},
+                        "$push": {"accounts_date": accounts_entry}
+                    },
+                    upsert=True
+            )
             
-            logger.info(f"Successfully stored/updated data for company {company_number}")
-            return True
+            success = result.modified_count > 0 or result.upserted_id is not None
+            if success:
+                logger.info(f"Updated company result for {company_number}")
+            else:
+                logger.warning(f"No changes made to company result for {company_number}")
             
-        except PyMongoError as e:
-            logger.error(f"Failed to insert result data: {e}")
+            return success
+            
+        except ValidationError as e:
+            logger.error(f"Validation error upserting company result: {e}")
             return False
+        except PyMongoError as e:
+            logger.error(f"Failed to upsert company result: {e}")
+            return False
+    
+    def get_pending_conversions(self) -> List[Dict[str, Any]]:
+        """
+        Get all pending conversions
+            
+        Returns:
+            list: List of conversion documents that need processing
+        """
+        try:
+            return list(self.conversions_collection.find({
+                "$or": [
+                    {"converted": False},
+                    {"uploaded": False},
+                    {"pineconeImported": False}
+                ]
+            }))
+        except PyMongoError as e:
+            logger.error(f"Failed to get pending conversions: {e}")
+            return []
     
     def get_company_data(self, company_number: str) -> Optional[Dict[str, Any]]:
         """
@@ -223,224 +576,10 @@ class MongoManager:
             dict|None: Company data or None if not found
         """
         try:
-            result = self.results_collection.find_one({"company_number": company_number})
-            return result
+            return self.results_collection.find_one({"company_number": company_number})
         except PyMongoError as e:
-            logger.error(f"Failed to retrieve company data: {e}")
+            logger.error(f"Failed to get company data: {e}")
             return None
-    
-    # Methods for conversions collection
-    def register_file_conversion(self, filename: str, account_date: str, company_number: str, zip_name: str = "") -> bool:
-        """
-        Register a file for conversion tracking, now with zip_name.
-        """
-        try:
-            document = {
-                "filename": filename,
-                "account_date": account_date,
-                "company_number": company_number,
-                "zip_name": zip_name,
-                "status": "pending",
-                "created_at": datetime.now(),
-                "updated_at": datetime.now()
-            }
-            result = self.conversions_collection.update_one(
-                {"filename": filename},
-                {"$set": document},
-                upsert=True
-            )
-            logger.info(f"Registered file conversion: {filename} (zip_name={zip_name})")
-            return True
-        except PyMongoError as e:
-            logger.error(f"Failed to register file conversion: {e}")
-            return False
-    
-    def update_conversion_status(self, filename: str, status: str) -> bool:
-        """
-        Update conversion status
-        
-        Args:
-            filename (str): HTML filename
-            status (str): New status (e.g., "completed", "failed")
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            result = self.conversions_collection.update_one(
-                {"filename": filename},
-                {
-                    "$set": {
-                        "status": status,
-                        "updated_at": datetime.now()
-                    }
-                }
-            )
-            
-            if result.modified_count == 0:
-                logger.warning(f"No conversion record found for file: {filename}")
-                
-            logger.info(f"Updated conversion status for {filename}: {status}")
-            return result.modified_count > 0
-            
-        except PyMongoError as e:
-            logger.error(f"Failed to update conversion status: {e}")
-            return False
-    
-    def get_pending_conversions(self) -> List[Dict[str, Any]]:
-        """
-        Get all pending file conversions
-        
-        Returns:
-            list: List of pending conversion documents
-        """
-        try:
-            return list(self.conversions_collection.find({"status": "pending"}))
-        except PyMongoError as e:
-            logger.error(f"Failed to retrieve pending conversions: {e}")
-            return []
-    
-    # Methods for downloads collection
-    def register_zip_download(self, filename: str) -> bool:
-        """
-        Register a ZIP file download
-        
-        Args:
-            filename (str): ZIP filename
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            document = {
-                "filename": filename,
-                "date": datetime.now(),
-                "status": "downloading",
-                "created_at": datetime.now(),
-                "updated_at": datetime.now()
-            }
-            
-            # Try to insert a new document, handle case where it already exists
-            try:
-                result = self.downloads_collection.insert_one(document)
-                logger.info(f"Registered new ZIP download: {filename}")
-                return True
-            except DuplicateKeyError:
-                # Update existing document if insert fails due to duplicate key
-                result = self.downloads_collection.update_one(
-                    {"filename": filename},
-                    {
-                        "$set": {
-                            "status": "downloading",
-                            "updated_at": datetime.now()
-                        }
-                    }
-                )
-                logger.info(f"Updated existing ZIP download record: {filename}")
-                return result.modified_count > 0
-            
-        except PyMongoError as e:
-            logger.error(f"Failed to register ZIP download: {e}")
-            return False
-    
-    def update_zip_status(self, filename: str, status: str) -> bool:
-        """
-        Update ZIP download status
-        
-        Args:
-            filename (str): ZIP filename
-            status (str): New status ("downloading", "downloaded", "error")
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            result = self.downloads_collection.update_one(
-                {"filename": filename},
-                {
-                    "$set": {
-                        "status": status,
-                        "updated_at": datetime.now()
-                    }
-                }
-            )
-            
-            if result.modified_count == 0:
-                logger.warning(f"No download record found for ZIP: {filename}")
-                
-            logger.info(f"Updated ZIP status for {filename}: {status}")
-            return result.modified_count > 0
-            
-        except PyMongoError as e:
-            logger.error(f"Failed to update ZIP status: {e}")
-            return False
-    
-    def get_downloads_by_status(self, status: str) -> List[Dict[str, Any]]:
-        """
-        Get all downloads with specified status
-        
-        Args:
-            status (str): Status to filter by
-            
-        Returns:
-            list: List of download documents
-        """
-        try:
-            return list(self.downloads_collection.find({"status": status}))
-        except PyMongoError as e:
-            logger.error(f"Failed to retrieve downloads by status: {e}")
-            return []
-    
-    # Utility methods
-    def extract_company_data(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Extract relevant company data from metadata
-        
-        Args:
-            metadata (dict): Metadata from XBRL file
-            
-        Returns:
-            dict: Structured company data
-        """
-        # Extract highest paid director info from text if available
-        highest_paid_director = {"name": "N/R", "remuneration": ""}
-        total_director_remuneration = ""
-        
-        if "full_text" in metadata:
-            full_text = metadata["full_text"]
-            
-            # Find highest paid director info
-            import re
-            hpd_match = re.search(r"highest\s+paid\s+director.*?[£$€]([0-9,.]+)", full_text, re.IGNORECASE)
-            if hpd_match:
-                highest_paid_director["remuneration"] = hpd_match.group(1)
-            
-            # Find total director remuneration
-            total_match = re.search(r"total\s+directors[']?\s+remuneration.*?[£$€]([0-9,.]+)", full_text, re.IGNORECASE)
-            if total_match:
-                total_director_remuneration = total_match.group(1)
-        
-        # Format accounts date if needed
-        accounts_date = metadata.get("account_date", "")
-        if accounts_date and "-" in accounts_date:
-            # Convert from YYYY-MM-DD to DD/MM/YYYY
-            try:
-                parts = accounts_date.split("-")
-                if len(parts) == 3:
-                    accounts_date = f"{parts[2]}/{parts[1]}/{parts[0]}"
-            except:
-                pass
-        
-        return {
-            "company_number": metadata.get("company_number", ""),
-            "company_name": metadata.get("company_name", ""),
-            "company_legal_type": metadata.get("company_legal_type", ""),
-            "accounts_date": accounts_date,
-            "highest_paid_director": highest_paid_director,
-            "total_director_remuneration": total_director_remuneration,
-            "currency": "GBP"  # Default currency
-        }
-
 
 # Example usage
 if __name__ == "__main__":
@@ -450,21 +589,34 @@ if __name__ == "__main__":
     # Initialize MongoDB manager
     mongo = MongoManager()
     
-    # Insert sample data
-    result = mongo.insert_result({
-        "company_number": "62473",
-        "company_name": "George Bence & Sons Limited",
-        "company_legal_type": "Private Limited Company",
-        "accounts_date": "31/12/2023",
-        "highest_paid_director": {
-            "name": "N/R",
-            "remuneration": "332,567"
-        },
-        "total_director_remuneration": "547,415",
-        "currency": "GBP"
-    })
+    # Example: Create a ZIP download record
+    zip_id = mongo.create_zip_download(
+        url="https://example.com/data.zip",
+        file_name="Accounts_Monthly_Data-2025-04.zip",
+        file_date="2025-04"
+    )
     
-    print(f"Insert result: {result}")
+    if zip_id:
+        # Update its status
+        mongo.update_zip_download_status(zip_id, downloaded=True)
+        
+        # Create a conversion record
+        conv_id = mongo.create_conversion(
+            zip_download_id=zip_id,
+            file_name="12345678.html",
+            file_date=datetime.now(),
+            company_number="12345678",
+            s3_bucket="my-bucket"
+        )
+        
+        if conv_id:
+            # Update conversion status
+            mongo.update_conversion_status(
+                conv_id,
+                retrieved=True,
+                converted=True,
+                recordCount=100
+            )
     
     # Close connection
     mongo.close() 

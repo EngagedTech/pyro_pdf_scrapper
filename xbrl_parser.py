@@ -8,7 +8,7 @@ import logging
 import uuid
 import json
 from bs4 import BeautifulSoup
-from typing import Dict, List, Any, Union, Tuple
+from typing import Dict, List, Any, Union, Tuple, Optional
 import pyarrow as pa
 import pyarrow.parquet as pq
 import numpy as np
@@ -16,6 +16,7 @@ import hashlib
 from config import VECTOR_DIMENSIONS
 import xbrl
 from xbrl import XBRLParser as LibXBRLParser
+from bson import ObjectId
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -75,75 +76,75 @@ class XBRLParser:
     
     def _truncate_text(self, text, max_length=10000):
         """
-        Trunca el texto a un tamaño máximo pero intenta preservar frases completas
+        Truncate text to maximum length while preserving complete sentences
         
         Args:
-            text (str): Texto a truncar
-            max_length (int): Longitud máxima permitida
+            text (str): Text to truncate
+            max_length (int): Maximum allowed length
             
         Returns:
-            str: Texto truncado
+            str: Truncated text
         """
         if not text or len(text) <= max_length:
             return text
             
-        # Si tenemos que truncar, intentamos hacerlo en un punto y aparte
+        # Try to truncate at a period
         truncated = text[:max_length]
         last_period = truncated.rfind('. ')
         
-        if last_period > max_length * 0.7:  # Si encontramos un punto en el último 30% del texto
+        if last_period > max_length * 0.7:  # If we find a period in the last 30% of text
             return truncated[:last_period+1]
         return truncated
 
     def _check_metadata_size(self, metadata, max_size=38000):
         """
-        Verifica el tamaño de los metadatos y los reduce si es necesario
+        Check metadata size and reduce if necessary
         
         Args:
-            metadata (dict): Metadatos a verificar
-            max_size (int): Tamaño máximo permitido en bytes
+            metadata (dict): Metadata to check
+            max_size (int): Maximum allowed size in bytes
             
         Returns:
-            dict: Metadatos ajustados al tamaño permitido
+            dict: Adjusted metadata within size limit
         """
-        # Convertir a JSON para medir el tamaño
+        # Convert to JSON to measure size
         metadata_json = json.dumps(metadata)
         current_size = len(metadata_json.encode('utf-8'))
         
-        # Si estamos dentro del límite, devolver sin cambios
+        # If within limit, return unchanged
         if current_size <= max_size:
             return metadata
             
         logger.warning(f"Metadata size is {current_size} bytes, exceeding limit of {max_size} bytes")
         
-        # Si el tamaño es mayor al límite, reducir el full_text
+        # If size exceeds limit, reduce full_text
         if 'full_text' in metadata and metadata['full_text']:
-            # Calcular cuánto texto podemos mantener
+            # Calculate how much text we can keep
             excess_bytes = current_size - max_size
-            # Añadimos un margen de seguridad del 20%
+            # Add 20% safety margin
             text_reduction = excess_bytes + int(excess_bytes * 0.2)
             
             current_text_len = len(metadata['full_text'])
             new_text_len = max(1000, current_text_len - text_reduction)
             
-            # Truncar el texto
+            # Truncate text
             metadata['full_text'] = self._truncate_text(metadata['full_text'], new_text_len)
             
-            # Verificar nuevamente
+            # Check again
             metadata_json = json.dumps(metadata)
             new_size = len(metadata_json.encode('utf-8'))
             
             logger.info(f"Reduced metadata size from {current_size} to {new_size} bytes")
             
-            # Si aún excede, intentar una reducción más agresiva
+            # If still exceeds, try more aggressive reduction
             if new_size > max_size:
-                # Extraer solo el comienzo y parte final del texto
+                # Extract only beginning and end of text
                 if len(metadata['full_text']) > 5000:
                     start = metadata['full_text'][:2500]
                     end = metadata['full_text'][-2500:]
                     metadata['full_text'] = f"{start}... [TRUNCATED] ...{end}"
                     
-                    # Último recurso: si sigue siendo demasiado grande, reducir drásticamente
+                    # Last resort: if still too large, drastically reduce
                     metadata_json = json.dumps(metadata)
                     if len(metadata_json.encode('utf-8')) > max_size:
                         metadata['full_text'] = metadata['full_text'][:max_size // 10]
@@ -153,28 +154,28 @@ class XBRLParser:
 
     def _extract_data_from_filename(self, filename):
         """
-        Extrae información del nombre del archivo usando el patrón Prod224_2476_00002687_20240405.html
+        Extract information from filename using pattern Prod224_2476_00002687_20240405.html
         
         Args:
-            filename (str): Nombre del archivo
+            filename (str): Filename
             
         Returns:
-            dict: Datos extraídos del nombre del archivo
+            dict: Data extracted from filename
         """
         try:
-            # Eliminar extensión y dividir por guiones bajos
+            # Remove extension and split by underscores
             base_name = os.path.splitext(filename)[0]
             parts = base_name.split('_')
             
-            # Verificar si tiene el formato esperado (al menos 4 partes)
+            # Check if has expected format (at least 4 parts)
             if len(parts) >= 4:
-                # Company number está en la penúltima posición
-                company_number = parts[-2]  # Penúltima posición
+                # Company number is in second-to-last position
+                company_number = parts[-2]
                 
-                # Fecha en la última posición
-                date_str = parts[-1]  # Última posición
+                # Date in last position
+                date_str = parts[-1]
                 if len(date_str) == 8 and date_str.isdigit():
-                    # Formato YYYYMMDD
+                    # Format YYYYMMDD
                     year = date_str[0:4]
                     month = date_str[4:6]
                     day = date_str[6:8]
@@ -188,120 +189,136 @@ class XBRLParser:
                     'account_date': account_date
                 }
             else:
-                logger.warning(f"Formato de nombre de archivo inesperado: {filename}")
+                logger.warning(f"Unexpected filename format: {filename}")
                 return {}
             
         except Exception as e:
-            logger.error(f"Error al extraer datos del nombre del archivo {filename}: {e}")
+            logger.error(f"Error extracting data from filename {filename}: {e}")
             return {}
 
     def _flatten_metadata(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Crear estructura de metadatos simplificada con solo los campos necesarios
+        Create simplified metadata structure with only required fields
         
         Args:
-            data (dict): Datos extraídos del documento
+            data (dict): Data extracted from document
             
         Returns:
-            dict: Metadata estructurada con campos clave simplificados
+            dict: Structured metadata with simplified key fields
         """
-        # Estructura base de metadatos (simplificada a los campos solicitados)
+        # Base metadata structure (simplified to requested fields)
         metadata = {
             "company_number": "",
             "company_name": "",
-            "account_date": "",
-            "year": None,
-            "month": None,
-            "day": None,
+            "company_legal_type": "",
+            "total_director_remuneration": "",
+            "highest_paid_director": {
+                "name": "",
+                "remuneration": ""
+            },
+            "currency": "GBP",
             "full_text": ""
         }
         
-        # Primero, extraer datos del nombre del archivo
+        # First, extract data from filename
         if "doc_file_name" in data:
             filename_data = self._extract_data_from_filename(data["doc_file_name"])
             metadata.update(filename_data)
         
-        # Segundo, extraer company_name del título del documento
+        # Second, extract company_name from document title
         if "doc_title" in data and data["doc_title"]:
-            # Normalmente el título sigue el patrón "Nombre de la Compañía - resto del título"
+            # Usually title follows pattern "Company Name - rest of title"
             title_parts = data["doc_title"].split(' - ', 1)
             if len(title_parts) > 0:
                 metadata["company_name"] = title_parts[0].strip()
         
-        # Tercer, buscar en metadatos si no se encontró en otros lugares
+        # Third, look in metadata if not found elsewhere
         if "meta_tags" in data:
             for meta in data["meta_tags"]:
                 name = meta.get("name", "").lower()
                 content = meta.get("content", "")
                 
-                # Capturar información específica de metadatos
+                # Capture specific metadata information
                 if name == "companynumber" and not metadata["company_number"]:
                     metadata["company_number"] = content
                 elif name == "companyname" and not metadata["company_name"]:
                     metadata["company_name"] = content
-                elif name == "accountdate" and not metadata["account_date"]:
-                    metadata["account_date"] = content
+                elif name == "companylegaltype":
+                    metadata["company_legal_type"] = content
         
-        # Añadir el texto completo extraído
+        # Extract director information from full text
         if "full_text" in data:
             metadata["full_text"] = data["full_text"]
+            
+            # Look for director remuneration information
+            import re
+            
+            # Find highest paid director info
+            hpd_match = re.search(r"highest\s+paid\s+director.*?[£$€]([0-9,.]+)", data["full_text"], re.IGNORECASE)
+            if hpd_match:
+                metadata["highest_paid_director"]["remuneration"] = hpd_match.group(1)
+            
+            # Find total director remuneration
+            total_match = re.search(r"total\s+directors[']?\s+remuneration.*?[£$€]([0-9,.]+)", data["full_text"], re.IGNORECASE)
+            if total_match:
+                metadata["total_director_remuneration"] = total_match.group(1)
             
         return metadata
     
     def _partition_document(self, doc_id, metadata, full_text, vector, max_metadata_size=38000):
         """
-        Particiona un documento grande en múltiples registros para evitar exceder
-        el límite de tamaño de metadatos de Pinecone.
+        Partition a large document into multiple records to avoid exceeding
+        Pinecone metadata size limit.
         
         Args:
-            doc_id (str): ID del documento
-            metadata (dict): Metadatos estructurados
-            full_text (str): Texto completo del documento
-            vector (list): Vector de embeddings
-            max_metadata_size (int): Tamaño máximo de metadatos en bytes
+            doc_id (str): Document ID
+            metadata (dict): Structured metadata
+            full_text (str): Full document text
+            vector (list): Embeddings vector
+            max_metadata_size (int): Maximum metadata size in bytes
             
         Returns:
-            list: Lista de registros particionados
+            list: List of partitioned records
         """
-        # Calcular cuántos caracteres podemos incluir en cada partición
-        # Primero verificamos el tamaño de los metadatos sin el texto completo
+        # Calculate how many characters we can include in each partition
+        # First check size of metadata without full text
         base_metadata = metadata.copy()
         base_metadata["full_text"] = ""
         base_metadata_json = json.dumps(base_metadata)
         base_size = len(base_metadata_json.encode('utf-8'))
         
-        # Espacio disponible para texto en cada partición
-        available_size = max_metadata_size - base_size - 100  # 100 bytes de margen
+        # Available space for text in each partition
+        available_size = max_metadata_size - base_size - 100  # 100 bytes margin
         
-        # Dividir texto en segmentos que quepan en los metadatos
+        # Split text into segments that fit in metadata
         text_segments = []
         remaining_text = full_text
         
         while remaining_text:
-            # Estimar cuántos caracteres podemos incluir (aproximado)
-            # En promedio, cada carácter UTF-8 puede ocupar ~1-4 bytes
-            estimated_chars = int(available_size / 2)  # Estimación conservadora
+            # Estimate how many characters we can include (approximate)
+            # On average, each UTF-8 character can take ~1-4 bytes
+            estimated_chars = int(available_size / 2)  # Conservative estimate
             
-            # Ajustar si el texto restante es más corto
+            # Adjust if remaining text is shorter
             if len(remaining_text) <= estimated_chars:
                 text_segments.append(remaining_text)
                 break
                 
-            # Buscar un buen punto de corte (final de oración)
+            # Look for a good cut point (end of sentence)
             segment = remaining_text[:estimated_chars]
             last_period = segment.rfind('. ')
             
-            if last_period > estimated_chars * 0.7:  # Si hay un punto en el último 30%
+            if last_period > estimated_chars * 0.7:  # If there's a period in last 30%
                 cut_point = last_period + 1
             else:
-                # Si no hay buen punto de corte, buscar espacio
+                # If no good cut point, look for space
                 last_space = segment.rfind(' ')
                 cut_point = last_space if last_space > 0 else estimated_chars
             
             text_segments.append(remaining_text[:cut_point])
             remaining_text = remaining_text[cut_point:].lstrip()
         
-        # Crear registros particionados
+        # Create partitioned records
         records = []
         total_parts = len(text_segments)
         
@@ -312,10 +329,10 @@ class XBRLParser:
             part_metadata["part_number"] = part_num
             part_metadata["total_parts"] = total_parts
             
-            # Crear ID único para esta partición
+            # Create unique ID for this partition
             part_id = f"{doc_id}_part{part_num}" if total_parts > 1 else doc_id
             
-            # Crear registro
+            # Create record
             record = {
                 "id": part_id,
                 "values": vector,
@@ -327,12 +344,13 @@ class XBRLParser:
         logger.info(f"Document partitioned into {len(records)} parts")
         return records
 
-    def xbrl_to_parquet(self, file_path: str, mongo_manager=None) -> str:
+    def xbrl_to_parquet(self, file_path: str, conversion_id: str, mongo_manager=None) -> Optional[str]:
         """
         Convert an XBRL file to Parquet format compliant with Pinecone requirements
         
         Args:
             file_path (str): Path to XBRL file (.html or .xml)
+            conversion_id (str): MongoDB conversion record ID
             mongo_manager (MongoManager, optional): MongoDB manager for storing data
             
         Returns:
@@ -345,11 +363,26 @@ class XBRLParser:
                 logger.warning(f"Skipping large file ({file_size_mb:.2f} MB): {file_path}")
                 return None
                 
-            # Obtener el nombre del ZIP desde el path del archivo extraído (padre del padre)
-            zip_folder = os.path.basename(os.path.dirname(os.path.dirname(file_path)))
-            output_subdir = os.path.join(self.output_dir, zip_folder)
+            # Get conversion record
+            if mongo_manager and conversion_id:
+                conversion = mongo_manager.conversions_collection.find_one({"_id": ObjectId(conversion_id)})
+                if not conversion:
+                    logger.error(f"No conversion record found for ID: {conversion_id}")
+                    return None
+                
+                # Get ZIP info for output directory structure
+                zip_info = mongo_manager.zip_download_collection.find_one({"_id": conversion["zipDownloadId"]})
+                if not zip_info:
+                    logger.error(f"No ZIP record found for conversion: {conversion_id}")
+                    return None
+                
+                # Create output directory structure
+                output_subdir = os.path.join(self.output_dir, zip_info["file_name"])
             os.makedirs(output_subdir, exist_ok=True)
             parquet_file = os.path.join(output_subdir, f"{os.path.basename(file_path).split('.')[0]}.parquet")
+            # else:
+            #     # Fallback to simple path if no MongoDB info
+            #     parquet_file = os.path.join(self.output_dir, f"{os.path.basename(file_path).split('.')[0]}.parquet")
             
             # Skip if output file already exists
             if os.path.exists(parquet_file):
@@ -358,15 +391,11 @@ class XBRLParser:
             
             logger.info(f"Parsing XBRL file: {file_path}")
             
-            # Datos generales del documento
+            # General document data
             document_data = {
                 'doc_file_name': os.path.basename(file_path),
                 'doc_file_path': file_path,
                 'meta_tags': [],
-                'director_info': {
-                    'directors': [],
-                    'highest_paid': {}
-                },
                 'full_text': "",
                 'doc_title': ""
             }
@@ -374,24 +403,15 @@ class XBRLParser:
             # Extract metadata from filename
             filename_data = self._extract_data_from_filename(document_data['doc_file_name'])
             
-            # Register conversion in MongoDB if manager is provided
-            if mongo_manager:
-                mongo_manager.register_file_conversion(
-                    filename=document_data['doc_file_name'],
-                    account_date=filename_data.get('account_date', ''),
-                    company_number=filename_data.get('company_number', ''),
-                    zip_name=zip_folder
-                )
-            
-            # Approach 1: Parse with BeautifulSoup to extract text and metadata
+            # Parse with BeautifulSoup to extract text and metadata
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='replace') as file:
                     content = file.read()
                 
-                # Usar BeautifulSoup para extraer el contenido
+                # Use BeautifulSoup to extract content
                 soup = BeautifulSoup(content, 'xml' if file_path.lower().endswith('.xml') else 'lxml')
                 
-                # Extraer todos los metadatos
+                # Extract all metadata
                 meta_tags = soup.find_all('meta')
                 for tag in meta_tags:
                     document_data['meta_tags'].append({
@@ -399,59 +419,28 @@ class XBRLParser:
                         'content': tag.get('content', '')
                     })
                 
-                # Extraer título
+                # Extract title
                 title_tag = soup.find('title')
                 if title_tag:
                     document_data['doc_title'] = title_tag.text.strip()
                 
-                # Extraer todo el texto legible
+                # Extract all readable text
                 document_data['full_text'] = soup.get_text(" ", strip=True)
                 
-                # Buscar información sobre directores
-                # Esta es una búsqueda simplificada, podría necesitar adaptarse según el formato específico
-                director_sections = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'p'], 
-                                                 string=lambda s: s and ('director' in s.lower() or 'board' in s.lower()))
-                
-                # Extract director remuneration
-                total_remuneration = ""
-                for section in director_sections:
-                    # Buscar textos cercanos que puedan contener información sobre pagos
-                    nearby_text = ' '.join([s.text for s in section.find_next_siblings(['p', 'div'], limit=5)])
-                    
-                    # Look for highest paid director
-                    if 'highest paid' in nearby_text.lower() or 'remuneration' in nearby_text.lower():
-                        # Extraer información mediante expresiones regulares
-                        import re
-                        amount_match = re.search(r'£([\d,]+)', nearby_text)
-                        if amount_match:
-                            document_data['director_info']['highest_paid'] = {
-                                'name': 'Not specified',
-                                'amount': amount_match.group(0)
-                            }
-                    
-                    # Look for total director remuneration
-                    if 'total' in nearby_text.lower() and 'remuneration' in nearby_text.lower():
-                        # Extraer información mediante expresiones regulares
-                        import re
-                        total_match = re.search(r'£([\d,]+)', nearby_text)
-                        if total_match:
-                            total_remuneration = total_match.group(0)
-                
-                # Generar un ID único para el documento
+                # Generate unique ID for document
                 doc_id = hashlib.md5(os.path.basename(file_path).encode()).hexdigest()
                 
-                # Generar vector para el documento completo
+                # Generate vector for complete document
                 vector = self._generate_vector(document_data['full_text'][:32000])
                 
-                # Generar metadatos estructurados
+                # Generate structured metadata
                 structured_metadata = self._flatten_metadata(document_data)
                 
-                # En lugar de truncar el texto, vamos a particionar el documento si es necesario
-                # Primero verificamos el tamaño total de los metadatos
+                # Check metadata size and partition if necessary
                 metadata_json = json.dumps(structured_metadata)
                 metadata_size = len(metadata_json.encode('utf-8'))
                 
-                # Log detallado del tamaño de metadatos
+                # Detailed logging of metadata size
                 logger.info(f"Metadata size for {os.path.basename(file_path)}: {metadata_size} bytes")
                 logger.info(f"Full text length: {len(structured_metadata.get('full_text', ''))}")
                 
@@ -466,28 +455,28 @@ class XBRLParser:
                         vector=vector
                     )
                 else:
-                    # Si el tamaño está dentro del límite, usamos un solo registro
+                    # If size is within limit, use single record
                     records = [{
                         "id": doc_id,
                         "values": vector,
                         "metadata": metadata_json
                     }]
                 
-                # Crear DataFrame con todos los registros
+                # Create DataFrame with all records
                 df = pd.DataFrame(records)
                 
-                # Asegurar columnas correctas
+                # Ensure correct columns
                 if set(df.columns) != set(["id", "values", "metadata"]):
-                    logger.warning(f"Columnas incorrectas en DataFrame: {df.columns}, ajustando...")
-                    # Asegurar que solo contiene las columnas requeridas
+                    logger.warning(f"Incorrect DataFrame columns: {df.columns}, adjusting...")
+                    # Ensure required columns exist
                     required_columns = ["id", "values", "metadata"]
                     for col in required_columns:
                         if col not in df.columns:
                             df[col] = ["" for _ in range(len(df))]
-                    # Eliminar columnas adicionales si existen
+                    # Remove additional columns if they exist
                     df = df[required_columns]
                 
-                # Exportar a Parquet
+                # Export to Parquet
                 table = pa.Table.from_pandas(df)
                 pq.write_table(
                     table, 
@@ -503,10 +492,11 @@ class XBRLParser:
                     logger.info(f"Created Parquet file for document: {parquet_file}")
                 
                 # Update conversion status in MongoDB if manager is provided
-                if mongo_manager:
+                if mongo_manager and conversion_id:
                     mongo_manager.update_conversion_status(
-                        filename=document_data['doc_file_name'],
-                        status="completed"
+                        _id=ObjectId(conversion_id),
+                        converted=True,
+                        recordCount=len(records)
                     )
                 
                 return parquet_file
@@ -515,10 +505,10 @@ class XBRLParser:
                 logger.error(f"Error parsing file {file_path}: {e}")
                 
                 # Update conversion status in MongoDB if manager is provided
-                if mongo_manager:
+                if mongo_manager and conversion_id:
                     mongo_manager.update_conversion_status(
-                        filename=document_data['doc_file_name'],
-                        status="failed"
+                        _id=ObjectId(conversion_id),
+                        converted=False
                     )
                     
                 return None
@@ -527,10 +517,10 @@ class XBRLParser:
             logger.error(f"Error converting {file_path} to Parquet: {e}")
             
             # Update conversion status in MongoDB if manager is provided
-            if mongo_manager:
+            if mongo_manager and conversion_id:
                 mongo_manager.update_conversion_status(
-                    filename=os.path.basename(file_path),
-                    status="failed"
+                    _id=ObjectId(conversion_id),
+                    converted=False
                 )
                 
             return None
@@ -553,7 +543,7 @@ class XBRLParser:
                 logger.info(f"Processing file {i+1}/{total_files}")
                 
             if file_path.lower().endswith(('.html', '.xml')):
-                parquet_file = self.xbrl_to_parquet(file_path)
+                parquet_file = self.xbrl_to_parquet(file_path, None)
                 if parquet_file:
                     parquet_files.append(parquet_file)
         

@@ -5,7 +5,7 @@ import os
 import sys
 
 def setup_logging():
-    """Configura un sistema de logging avanzado con diferentes niveles y tags"""
+    """Configures an advanced logging system with different levels and tags"""
     log_config = {
         'version': 1,
         'formatters': {
@@ -54,15 +54,15 @@ def setup_logging():
     logging.setLogRecordFactory(record_factory)
 
 def check_dependencies():
-    """Verifica que todas las dependencias estén instaladas con la versión correcta"""
-    # Primero verificamos si están instaladas las dependencias mínimas para iniciar
+    """Verifies that all dependencies are installed with the correct version"""
+    # First check if the minimum dependencies are installed to start
     try:
         import dotenv
         # python-dotenv está instalado, no necesitamos verificar su versión exacta
     except ImportError:
-        print("❌ La dependencia python-dotenv no está instalada.")
-        print("   Esta es necesaria para cargar las variables de entorno.")
-        print("   Instala las dependencias básicas con: pip install python-dotenv")
+        print("❌ The python-dotenv dependency is not installed.")
+        print("   This is necessary to load environment variables.")
+        print("   Install the basic dependencies with: pip install python-dotenv")
         return False
     
     # Una vez que python-dotenv está disponible, podemos cargar config
@@ -102,8 +102,8 @@ def check_dependencies():
             required_dependencies['pinecone'] = optional_dependencies['pinecone']
     except Exception as e:
         # Si hay algún error al cargar config, usamos solo dependencias básicas
-        print(f"⚠️ No se pudo cargar la configuración: {e}")
-        print("   Verificando solo dependencias básicas.")
+        print(f"⚠️ Could not load configuration: {e}")
+        print("   Checking only basic dependencies.")
         
         required_dependencies = {
             'requests': '2.28.0',
@@ -159,32 +159,32 @@ def check_dependencies():
         core_incompatible = incompatible
     
     if missing or incompatible:
-        print("⚠️ Problemas con dependencias:")
+        print("⚠️ Problems with dependencies:")
         if missing:
-            print(f"  Faltantes: {', '.join(missing)}")
+            print(f"  Missing: {', '.join(missing)}")
         if incompatible:
-            print(f"  Versiones incompatibles: {', '.join(incompatible)}")
+            print(f"  Incompatible versions: {', '.join(incompatible)}")
         
         if core_missing or core_incompatible:
-            print("❌ Faltan dependencias críticas necesarias para la ejecución.")
-            print("   Instale todas las dependencias con: pip install -r requirements.txt")
+            print("❌ Missing critical dependencies needed for execution.")
+            print("   Install all dependencies with: pip install -r requirements.txt")
             return False
         else:
-            print("⚠️ Algunas dependencias opcionales no están disponibles.")
-            print("   El programa continuará pero algunas funciones podrían no funcionar correctamente.")
+            print("⚠️ Some optional dependencies are not available.")
+            print("   The program will continue but some functions may not work correctly.")
     
     return True
 
 def validate_environment(required_stage='all'):
     """
-    Valida que las variables de entorno críticas estén configuradas 
-    con valores válidos antes de ejecutar el proceso.
+    Validates that critical environment variables are configured
+    with valid values before executing the process.
     
     Args:
-        required_stage (str): El modo de validación:
-            - 'all': Valida todas las variables (Pinecone, S3, Scraping)
-            - 'scrape_only': Solo valida variables de scraping
-            - 's3_only': Valida variables de scraping y S3
+        required_stage (str): Validation mode:
+            - 'all': Validates all variables (Pinecone, S3, Scraping)
+            - 'scrape_only': Validates scraping variables only
+            - 's3_only': Validates scraping and S3 variables
     
     Returns:
         tuple: (is_valid, missing_vars, invalid_vars)
@@ -224,25 +224,25 @@ def validate_environment(required_stage='all'):
     
     # Verificar que no se hayan activado flags contradictorios
     if SCRAPE_ONLY and IMPORT_ONLY:
-        invalid_vars.append("SCRAPE_ONLY y IMPORT_ONLY no pueden estar activos simultáneamente")
+        invalid_vars.append("SCRAPE_ONLY and IMPORT_ONLY cannot be active simultaneously")
     
     is_valid = len(missing_vars) == 0 and len(invalid_vars) == 0
     
     return (is_valid, missing_vars, invalid_vars)
 
 def main():
-    """Función principal de configuración"""
-    print("⚙️ Configurando el entorno...")
+    """Main configuration function"""
+    print("⚙️ Configuring the environment...")
     
-    # Verificar dependencias
+    # Check dependencies
     if not check_dependencies():
-        print("❌ Por favor, instale las dependencias faltantes y reinicie.")
+        print("❌ Please install the missing dependencies and restart.")
         sys.exit(1)
     
     # Configurar logging
     setup_logging()
     
-    print("✅ Entorno configurado correctamente.")
+    print("✅ Environment configured correctly.")
     
 if __name__ == "__main__":
     main()

@@ -42,7 +42,7 @@ def find_free_port(start_port: int) -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Manejador del ciclo de vida de la aplicación
+    Lifecycle handler for the application
     """
     try:
         # Encontrar un puerto libre para Prometheus
@@ -73,7 +73,7 @@ app = FastAPI(
 @app.post("/start-processing")
 async def start_processing() -> Dict:
     """
-    Endpoint para iniciar el proceso completo de descarga y procesamiento
+    Endpoint to start the complete download and processing process
     """
     try:
         # Iniciar el proceso de descarga y extracción asíncrona
@@ -84,45 +84,45 @@ async def start_processing() -> Dict:
             process_results_path = os.path.join(os.path.dirname(__file__), "process_results.py")
             if os.path.exists(process_results_path):
                 try:
-                    logger.info("Iniciando procesamiento posterior...")
+                    logger.info("Starting post-processing...")
                     # Usar python3 explícitamente y la ruta completa de Python
                     python_path = "/usr/bin/python3"  # Ruta estándar en macOS
                     if not os.path.exists(python_path):
                         python_path = "python3"  # Fallback al PATH del sistema
                     
                     subprocess.Popen([python_path, process_results_path])
-                    logger.info("Proceso posterior iniciado correctamente")
+                    logger.info("Post-processing started successfully")
                 except Exception as e:
-                    logger.warning(f"No se pudo iniciar el procesamiento posterior: {e}")
+                    logger.warning(f"Could not start post-processing: {e}")
             else:
-                logger.info("process_results.py no encontrado - continuando sin procesamiento posterior")
+                logger.info("process_results.py not found - continuing without post-processing")
             
             return {
                 "status": "success",
-                "message": "Procesamiento iniciado correctamente",
+                "message": "Processing started successfully",
                 "zips_processed": results["zips_processed"],
                 "files_extracted": results["files_extracted"],
                 "files": results["extracted_files"],
-                "details": "Archivos procesados y guardados correctamente"
+                "details": "Files processed and saved successfully"
             }
         else:
             return {
                 "status": "error",
-                "message": "No se pudieron procesar los archivos",
+                "message": "Could not process files",
                 "details": results
             }
         
     except Exception as e:
-        logger.error(f"Error en el procesamiento: {str(e)}")
+        logger.error(f"Error in processing: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/clear-cache")
 async def clear_cache(cache_pattern: CachePattern = None) -> Dict:
     """
-    Endpoint para limpiar la caché de Redis
-    
+    Endpoint to clear Redis cache
+
     Args:
-        cache_pattern: Patrón opcional para limpiar caché específica
+        cache_pattern: Optional pattern to clear specific cache
     """
     try:
         pattern = cache_pattern.pattern if cache_pattern else None
@@ -138,10 +138,10 @@ async def clear_cache(cache_pattern: CachePattern = None) -> Dict:
 @app.post("/clear-file-cache/{file_path:path}")
 async def clear_file_cache(file_path: str) -> Dict:
     """
-    Endpoint para limpiar la caché de un archivo específico
+    Endpoint to clear the cache of a specific file
     
     Args:
-        file_path: Ruta del archivo para limpiar su caché
+        file_path: Path of the file to clear its cache
     """
     try:
         xbrl_processor.clear_file_cache(file_path)
